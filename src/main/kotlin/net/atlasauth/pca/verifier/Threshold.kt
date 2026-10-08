@@ -3,113 +3,91 @@ package net.atlasauth.pca.verifier
 import java.nio.charset.StandardCharsets
 
 /**
- * Risk-adaptive threshold signatures (spec §6 L2/L3), a sound t-of-n MULTI-SIGNATURE: a bag of `t`
- * INDEPENDENT Ed25519 signatures, each produced by a distinct allowed role over the SAME canonical message
- * (`Pca.thresholdMessage(pcactn)`). Verification counts the number of DISTINCT keys (== distinct roles,
- * since the signer set maps one key to one role) whose share both (a) is signed by that role's registered
- * key and (b) verifies over that role's message; the signature is accepted iff that count is >= t.
+ * Threshold-share verification, mirroring `packages/pca/src/threshold.ts` (and the Java / Rust / Go / Python /
+ * Ruby / PHP / .NET / Swift SDKs). Covers the v2.1 AGENT-LEAF BINDING (conformance `agent_leaf_binding: "2.1"`):
+ * every role's EXPLICIT share — `guardian`, `principal` AND (new in v2.1) `agent` — signs the SAME
+ * role/signer-set/threshold-bound bytes
  *
- * Faithful Kotlin port of `packages/pca/src/threshold.ts` (`signerSetHash`, `shareMessage`, `verifyThreshold`).
- * Role-, signer-set- and t-bound so a share cannot be replayed under another role, in a different signer set,
- * or at a different threshold. Deterministic and TOTAL — never throws.
+ *     "atlas-pca/share/<role>\0" || sha256(thresholdMessage) || signerSetHash || t(1 byte) || suiteTag
+ *
+ * so a share cannot be replayed under another role, in a different signer set, or at a different threshold. The
+ * OLD bare-threshold-message agent share MUST be rejected because it does not verify over these bound bytes
+ * (GAP 2 `agent-bare-rejected`), and a share bound to signer set A MUST be rejected against signer set B — the
+ * `signerSetHash` binding defeats cross-signer-set replay (`agent-bound-wrong-set`). The PCActn LEAF signature
+ * `p.sig` is the only thing that stays bare (it signs `thresholdMessage` directly) and is handled by the
+ * `leaf_signature` verifier check, not here.
+ *
+ * Fail-closed throughout: an unknown suite, a malformed signer set, a bad base64url field, or a signature that
+ * does not verify all return `false`; nothing in the verify path swallows an exception into a pass.
  */
 object Threshold {
-    val ROLES = listOf("agent", "guardian", "principal")
-    val VALID_THRESHOLDS = listOf(1, 2, 3)
     private const val SIGNER_SET_DOMAIN = "atlas-pca/signerset/v1\u0000"
 
-    private fun isValidT(t: Int): Boolean = t == 1 || t == 2 || t == 3
+    /** Domain-separated suite tag appended for a NON-default suite; ed25519 / absent / unknown => empty. */
+    private const val SHARE_SUITE_TAG = "\u0000atlas-pca/share-suite/v1\u0000"
 
-    data class Signer(val role: String, val publicKey: String)
+    /** Version marker for the v2.1 agent-leaf share binding (matches `vectors.json.agent_leaf_binding`). */
+    const val AGENT_LEAF_SHARE_BINDING_VERSION = "2.1"
 
-    data class ThresholdShare(val role: String, val publicKey: String, val sig: String)
-
-    data class ThresholdVerdict(
-        val ok: Boolean,
-        val count: Int,
-        val roles: List<String>,
-        val reason: String? = null,
-    )
+    private fun utf8(s: String): ByteArray = s.toByteArray(StandardCharsets.UTF_8)
 
     /**
-     * Hash of a signer set: sha256(DOMAIN || canonical(sorted [{publicKey, role}])), sorted bytewise by
-     * (role, publicKey). Order-insensitive, so signer and verifier agree however the set is listed.
+     * `sha256(DOMAIN || canonical(sorted [{publicKey, role[, pq_pk]}]))`, the rows sorted bytewise by
+     * `(role, publicKey)` so signer and verifier agree however the set is listed. ADDITIVE: a registered
+     * `pq_pk` is carried into the bound set; an ed25519-only set hashes byte-identically to pre-agility.
      */
-    fun signerSetHash(signerSet: List<Signer>): ByteArray {
-        val rows = signerSet
-            .map { linkedMapOf<String, Any?>("publicKey" to it.publicKey, "role" to it.role) }
-            .sortedWith(Comparator { a, b ->
-                val c = Json.compareUtf8(a["role"] as String, b["role"] as String)
-                if (c != 0) c else Json.compareUtf8(a["publicKey"] as String, b["publicKey"] as String)
-            })
-        return Pca.sha(Pca.concat(SIGNER_SET_DOMAIN.toByteArray(StandardCharsets.UTF_8), Pca.canonBytes(rows)))
+    fun signerSetHash(signerSet: List<Any?>): ByteArray {
+        val rows = signerSet.map { o ->
+            val s = Pca.asMap(o)
+            val row = LinkedHashMap<String, Any?>()
+            row["publicKey"] = s["publicKey"].toString()
+            row["role"] = s["role"].toString()
+            if (s["pq_pk"] is String) row["pq_pk"] = s["pq_pk"]
+            row
+        }.sortedWith(Comparator { a, b ->
+            val c = Json.compareUtf8(a["role"] as String, b["role"] as String)
+            if (c != 0) c else Json.compareUtf8(a["publicKey"] as String, b["publicKey"] as String)
+        })
+        return Pca.sha(utf8(SIGNER_SET_DOMAIN), Pca.canonBytes(rows))
     }
 
-    /**
-     * The bytes a guardian / principal SHARE signs:
-     *   "atlas-pca/share/<role>\0" || sha256(thresholdMessage) || signerSetHash || t   (t = ONE byte, 1..3)
-     * The AGENT role's share is the PCActn leaf signature `sig`, which signs `thresholdMessage` directly.
-     */
-    fun shareMessage(role: String, message: ByteArray, signerSet: List<Signer>, t: Int): ByteArray {
-        if (!isValidT(t)) throw IllegalArgumentException("shareMessage: t must be 1, 2 or 3")
+    /** Empty for ed25519 / absent / unknown, else `SHARE_SUITE_TAG || suite.alg`. */
+    private fun shareSuiteTag(alg: Any?, algPresent: Boolean): ByteArray {
+        val suite = Pq.resolveSigAlg(alg, algPresent)
+        if (suite == null || suite.alg == "ed25519") return ByteArray(0)
+        return utf8(SHARE_SUITE_TAG + suite.alg)
+    }
+
+    /** The bytes a share of `role` signs. `t` MUST be 1, 2 or 3. */
+    fun shareMessage(role: String, thresholdMessage: ByteArray, signerSet: List<Any?>, t: Int, alg: Any?, algPresent: Boolean): ByteArray {
+        require(t in 1..3) { "shareMessage: t must be 1, 2 or 3" }
         return Pca.concat(
-            "atlas-pca/share/$role\u0000".toByteArray(StandardCharsets.UTF_8),
-            Pca.sha(message),
+            utf8("atlas-pca/share/$role\u0000"),
+            Pca.sha(thresholdMessage),
             signerSetHash(signerSet),
             byteArrayOf(t.toByte()),
+            shareSuiteTag(alg, algPresent),
         )
     }
 
     /**
-     * Verify a t-of-n multi-signature over `message` (= `Pca.thresholdMessage(pcactn)`). The signer set is
-     * validated FIRST and the whole verification fails closed if it is malformed: every role is a known role,
-     * each role has EXACTLY ONE registered key, and no public key is registered under two roles. A share counts
-     * iff its role+key are registered and its signature verifies over that role's message. The count is of
-     * DISTINCT KEYS.
+     * Verify a single EXPLICIT threshold share by RECOMPUTING the role/set/t-bound [shareMessage] from the entry
+     * (never trusting a precomputed `share_message`) and checking `share.sig` over it under `share.publicKey`
+     * (ed25519) / `share.pq_pk` (PQ) per `share.alg`. Fail-closed; never throws.
+     *
+     * @param role             the binding role (the threshold_share entry's `role`)
+     * @param thresholdMessage the RAW threshold message bytes (base64url-decoded `threshold_message`)
+     * @param signerSet        the signer set the share is bound into
+     * @param t                the threshold (1..3)
+     * @param share            `{role, publicKey, sig[, alg, pq_pk, pq_sig]}`
      */
-    fun verifyThreshold(shares: List<ThresholdShare>, message: ByteArray, signerSet: List<Signer>, t: Int): ThresholdVerdict {
-        fun fail(reason: String) = ThresholdVerdict(false, 0, emptyList(), reason)
-        if (!isValidT(t)) return fail("invalid threshold t=$t (must be 1, 2 or 3)")
-
-        val keyOfRole = HashMap<String, String>()
-        val roleOfKey = HashMap<String, String>()
-        for (s in signerSet) {
-            if (!ROLES.contains(s.role) || Pca.decodeB64uStrict(s.publicKey, 32) == null) return fail("malformed signer set")
-            val prevKey = keyOfRole[s.role]
-            if (prevKey != null && prevKey != s.publicKey) return fail("signer set registers more than one key for role ${s.role}")
-            val prevRole = roleOfKey[s.publicKey]
-            if (prevRole != null && prevRole != s.role) return fail("signer set registers one key under two roles")
-            keyOfRole[s.role] = s.publicKey
-            roleOfKey[s.publicKey] = s.role
+    fun verifyShare(role: String, thresholdMessage: ByteArray, signerSet: List<Any?>, t: Int, share: Map<String, Any?>): Boolean {
+        return try {
+            val msg = shareMessage(role, thresholdMessage, signerSet, t, share["alg"], share.containsKey("alg"))
+            val publicKey = Pca.asStr(share["publicKey"])
+            Pq.verifyLeafSuite(share["alg"], share.containsKey("alg"), publicKey, share["pq_pk"], msg, share["sig"], share["pq_sig"])
+        } catch (e: RuntimeException) {
+            false // fail-closed: a malformed share never counts as a valid one
         }
-
-        val validKeys = LinkedHashSet<String>()
-        val validRoles = ArrayList<String>()
-        var reason: String? = null
-
-        for (share in shares) {
-            if (validKeys.contains(share.publicKey)) continue // a key counts once
-            val registeredKey = keyOfRole[share.role]
-            if (registeredKey == null) {
-                if (reason == null) reason = "role ${share.role} is not in the signer set"
-                continue
-            }
-            if (share.publicKey != registeredKey) {
-                if (reason == null) reason = "share for role ${share.role} uses a key not registered for that role"
-                continue
-            }
-            val signed = if (share.role == "agent") message else shareMessage(share.role, message, signerSet, t)
-            if (!Pca.verifyB64u(share.publicKey, signed, share.sig)) {
-                if (reason == null) reason = "invalid signature for role ${share.role}"
-                continue
-            }
-            validKeys.add(share.publicKey)
-            validRoles.add(share.role)
-        }
-
-        val count = validKeys.size
-        val ok = count >= t
-        return if (ok) ThresholdVerdict(true, count, validRoles)
-        else ThresholdVerdict(false, count, validRoles, reason ?: "only $count distinct valid key(s), need $t")
     }
 }
