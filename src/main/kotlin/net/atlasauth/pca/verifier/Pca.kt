@@ -261,19 +261,38 @@ object Pca {
         return m
     }
 
-    /** Returns "" when OK, else an error label. */
+    /**
+     * [bodyOf] + the suite fields (`alg`, `pq_pk`) bound in for a non-default suite (so a downgrade or ML-DSA
+     * key-swap breaks the hop digest), byte-identical to [bodyOf] for ed25519. Mirrors `signableBody` in
+     * capability.ts. Returns null for an unknown alg (FAIL-CLOSED).
+     */
+    private fun signableHopBody(c: Map<String, Any?>): Map<String, Any?>? {
+        val suite = Pq.resolveSigAlg(c["alg"], c.containsKey("alg")) ?: return null
+        val body = LinkedHashMap(bodyOf(c))
+        if (suite.alg != "ed25519") {
+            body["alg"] = suite.alg
+            if (suite.needsPqPk && c["pq_pk"] is String) body["pq_pk"] = c["pq_pk"]
+        }
+        return body
+    }
+
+    /** Returns "" when OK, else an error label. Suite-agile: an unknown hop alg fails closed before any hashing. */
     private fun checkSig(c: Map<String, Any?>, signer: String, label: String): String {
+        val body = signableHopBody(c) ?: return "$label: unknown signature alg '${c["alg"]}'"
         val digest = try {
-            hashCanonical(bodyOf(c))
+            hashCanonical(body)
         } catch (e: RuntimeException) {
             return "$label: malformed body"
         }
         val bd = asStr(c["body_digest"])
         val id = asStr(c["id"])
         if (digest != bd || id != bd) return "$label: body digest mismatch"
-        val raw = decodeB64uStrict(bd, 32)
-        if (raw == null || !verifyB64u(signer, concat(CAP_DOMAIN, raw), asStr(c["sig"])))
-            return "$label: bad signature (not signed by expected key)"
+        val raw = decodeB64uStrict(bd, 32) ?: return "$label: bad signature (not signed by expected key)"
+        // Suite-agile hop verification (mirrors verifyLeafSuite): ed25519 == verifyB64u(signer, msg, sig);
+        // hybrid requires BOTH the Ed25519 `sig` (under `signer`) AND the ML-DSA `pq_sig` (under `pq_pk`);
+        // pure ml-dsa-65 verifies `sig` under `pq_pk`. The signer is the expected Ed25519 key.
+        val ok = Pq.verifyLeafSuite(c["alg"], c.containsKey("alg"), signer, c["pq_pk"], concat(CAP_DOMAIN, raw), c["sig"], c["pq_sig"])
+        if (!ok) return "$label: bad signature (not signed by expected key)"
         return ""
     }
 
@@ -332,8 +351,11 @@ object Pca {
     /** Length unit for aud / nonce limits is UTF-8 BYTES. */
     private fun utf8Len(s: String): Int = s.toByteArray(StandardCharsets.UTF_8).size
 
-    /** Closed capability-hop key set (parent optional). */
-    private val CAP_KEYS = listOf("id", "issuer", "holder", "body_digest", "caveats", "sig", "parent")
+    /**
+     * Closed capability-hop key set (parent optional). The B4 crypto-agility fields (alg/pq_pk/pq_sig) are
+     * additive on a hop exactly as at the top level: absent alg == ed25519 (pq_pk/pq_sig forbidden, byte-identical).
+     */
+    private val CAP_KEYS = listOf("id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig")
 
     private fun isObj(o: Any?): Boolean = o is Map<*, *>
     private fun isStr(o: Any?): Boolean = o is String
@@ -420,7 +442,10 @@ object Pca {
                     if (!CAP_KEYS.contains(k)) return "unknown field 'cap_chain[$i].$k'"
                 for (k in arrayOf("id", "issuer", "holder", "body_digest"))
                     if (decodeB64uStrict(c[k], 32) == null) return "cap_chain[$i].$k is not canonical base64url (32 bytes)"
-                if (decodeB64uStrict(c["sig"], 64) == null) return "cap_chain[$i].sig is not canonical base64url (64 bytes)"
+                // B4 crypto-agility: validate the hop's alg/sig/pq_pk/pq_sig per suite, exactly as the leaf.
+                // Absent alg asserts a 64-byte sig and that pq_pk/pq_sig are absent (byte-identical pre-B4 hop).
+                val hopSigWire = Pq.validateSignatureWire(c)
+                if (hopSigWire != null) return "cap_chain[$i]: $hopSigWire"
                 if (c.containsKey("parent") && decodeB64uStrict(c["parent"], 32) == null)
                     return "cap_chain[$i].parent is not canonical base64url (32 bytes)"
                 if (c["caveats"] !is List<*>) return "cap_chain[$i].caveats must be an array of {type,...} objects"

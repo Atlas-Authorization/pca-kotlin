@@ -154,4 +154,13 @@ object Pq {
             else -> false
         }
     }
+
+    /**
+     * Verify a NON-LEAF transparency/authority ARTIFACT signature (STH, revocation, beacon, bond-settlement,
+     * safety-certificate, judge-verdict, software-attestation) over `msg` under suite `alg` — the SAME agility
+     * seam as the leaf ([verifyLeafSuite]). `edPub` is the Ed25519 key, `pqPk` the ML-DSA key. Fail-closed: an
+     * unknown / unimplemented suite or any invalid component returns false; never throws.
+     */
+    fun verifyArtifactSignature(alg: String?, edPub: String?, pqPk: Any?, msg: ByteArray, sig: Any?, pqSig: Any?): Boolean =
+        verifyLeafSuite(alg, true, edPub, pqPk, msg, sig, pqSig)
 }
