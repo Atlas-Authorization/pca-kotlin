@@ -525,7 +525,7 @@ object Pca {
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
-     * validity, chain, plan_inclusion, leaf_signature, counter. allow = every check true.
+     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter. allow = every check true.
      */
     fun verifyPcactn(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience): Verdict {
         val v = Verdict()
@@ -568,6 +568,14 @@ object Pca {
             }
             if (why.isEmpty()) v.checks["chain"] = true else v.fail("chain", why)
 
+            // grant_ref_bound (normative): the signed grant_ref MUST be a non-empty string byte-equal to the id of the
+            // ROOT capability of the presented chain (cap_chain[0].id). Independent of the chain verdict; fail-closed
+            // on an empty / malformed chain. Replay state is keyed on grant_ref, so it must not be attacker-chosen.
+            val gref = p["grant_ref"]
+            val rootId = (chain.firstOrNull() as? Map<*, *>)?.get("id")
+            if (gref is String && gref.isNotEmpty() && rootId is String && gref == rootId) v.checks["grant_ref_bound"] = true
+            else v.fail("grant_ref_bound", "grant_ref is not the id of the root capability in cap_chain")
+
             // plan inclusion (leaf recomputed from the action itself)
             val plan = asMap(p["plan"])
             val action = asMap(p["action"])
@@ -601,7 +609,7 @@ object Pca {
         }
         // any check not reached (internal error) is a failure; keep normative key order
         val ordered = LinkedHashMap<String, Boolean>()
-        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "plan_inclusion", "leaf_signature", "counter"))
+        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"))
             ordered[k] = v.checks[k] == true
         v.checks.clear()
         v.checks.putAll(ordered)
