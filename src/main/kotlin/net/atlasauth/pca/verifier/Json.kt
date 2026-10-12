@@ -20,6 +20,13 @@ import java.nio.charset.StandardCharsets
  */
 object Json {
     const val MAX_DEPTH = 32
+
+    /**
+     * Nesting cap of the LENIENT canonical form (a public helper only: every protocol digest uses the strict form, capped
+     * at MAX_DEPTH). Without it a deep value (or a cycle) overflowed the stack and the StackOverflowError escaped the caller.
+     * Same value as the .NET LenientMaxDepth.
+     */
+    const val MAX_LENIENT_DEPTH = 512
     const val MAX_CHARS = 1 shl 20
     const val MAX_DECIMAL_DIGITS = 15
     private val MAX_SAFE: BigInteger = BigInteger.valueOf(9007199254740991L)
@@ -66,7 +73,7 @@ object Json {
             return numberError(r) == null && r.indexOf('.') < 0
         }
         if (o is Int) return true
-        if (o is Long) return Math.abs(o) <= 9007199254740991L
+        if (o is Long) return o >= -9007199254740991L && o <= 9007199254740991L // not Math.abs: abs(Long.MIN_VALUE) is negative
         return false
     }
 
@@ -262,7 +269,7 @@ object Json {
     }
 
     // ---- canonical serializers ----
-    /** LENIENT canonical form (content addressing: capabilities, Merkle leaves). Keys in UTF-8 bytewise order. */
+    /** LENIENT canonical form (a public helper; protocol digests use [canonicalizeStrict]). Keys in UTF-8 bytewise order. */
     fun canonicalize(v: Any?): String {
         val sb = StringBuilder()
         ser(sb, v, false, 1)
@@ -354,7 +361,7 @@ object Json {
                 sb.append(v.toString())
             }
             is List<*> -> {
-                if (strict && depth > MAX_DEPTH) throw IllegalArgumentException("canonicalize: nesting too deep")
+                if (depth > (if (strict) MAX_DEPTH else MAX_LENIENT_DEPTH)) throw IllegalArgumentException("canonicalize: nesting too deep")
                 sb.append('[')
                 var first = true
                 for (x in v) {
@@ -365,7 +372,7 @@ object Json {
                 sb.append(']')
             }
             is Map<*, *> -> {
-                if (strict && depth > MAX_DEPTH) throw IllegalArgumentException("canonicalize: nesting too deep")
+                if (depth > (if (strict) MAX_DEPTH else MAX_LENIENT_DEPTH)) throw IllegalArgumentException("canonicalize: nesting too deep")
                 val m = v as Map<String, Any?>
                 val keys = ArrayList(m.keys)
                 keys.sortWith(Comparator { a, b -> compareUtf8(a, b) })

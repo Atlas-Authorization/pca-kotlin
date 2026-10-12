@@ -20,6 +20,32 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519
 object Pca {
     const val WIRE_VERSION = 2L
     const val MAX_CHAIN_HOPS = 16
+    /** Shared hard caveat caps (all PCA verifiers): per-hop cumulative list, and the sum over every hop of a chain. */
+    const val MAX_CAVEATS_PER_HOP = 256
+    const val MAX_CAVEATS_PER_CHAIN = 1024
+    const val CAVEAT_LIMIT_REASON = "chain exceeds caveat limit (max $MAX_CAVEATS_PER_HOP per hop, $MAX_CAVEATS_PER_CHAIN per chain)"
+
+    /** True when the chain breaks the caveat caps; reads raw list sizes only, so it runs before any hashing/signature work. */
+    internal fun caveatLimitExceeded(chain: List<Any?>): Boolean {
+        var total = 0L
+        for (c in chain) {
+            val n = ((c as? Map<*, *>)?.get("caveats") as? List<*>)?.size ?: 0
+            if (n > MAX_CAVEATS_PER_HOP) return true
+            total += n
+            if (total > MAX_CAVEATS_PER_CHAIN) return true
+        }
+        return false
+    }
+    /** Shared raw wire-size cap of a PCActn JSON document (UTF-8 bytes), checked before any parsing. */
+    const val MAX_ARTIFACT_BYTES = 524288
+    const val ARTIFACT_SIZE_REASON = "artifact exceeds size limit (max $MAX_ARTIFACT_BYTES bytes)"
+
+    /** True when the raw document exceeds [MAX_ARTIFACT_BYTES] UTF-8 bytes (O(1) for clearly small/large strings). */
+    fun artifactTooLarge(text: String): Boolean {
+        if (text.length > MAX_ARTIFACT_BYTES) return true
+        if (text.length.toLong() * 3 <= MAX_ARTIFACT_BYTES) return false
+        return text.toByteArray(Charsets.UTF_8).size > MAX_ARTIFACT_BYTES
+    }
     const val MAX_LIFETIME_MS = 3_600_000L
     const val MAX_SKEW_MS = 60_000L
     const val MAX_AUD_LEN = 256
@@ -106,7 +132,13 @@ object Pca {
 
     fun asStr(o: Any?): String = if (o is String) o else ""
 
-    fun canonBytes(v: Any?): ByteArray = Json.canonicalize(v).toByteArray(StandardCharsets.UTF_8)
+    /**
+     * Canonical bytes of every protocol digest (capHash / hop body digest, Merkle leaves, params/conditions digests, the
+     * signer-set hash): the STRICT form, exactly as hash.ts canonicalBytes. An out-of-profile value (nesting deeper than
+     * [Json.MAX_DEPTH], a non-canonical number, a lone surrogate) throws here (fail closed) instead of hashing under the
+     * lenient form that the reference never produces.
+     */
+    fun canonBytes(v: Any?): ByteArray = Json.canonicalizeStrict(v).toByteArray(StandardCharsets.UTF_8)
 
     fun hashCanonical(v: Any?): String = b64(sha(canonBytes(v)))
 
@@ -258,6 +290,7 @@ object Pca {
         m["holder"] = c["holder"]
         m["caveats"] = c["caveats"]
         m["parent"] = c["parent"]
+        if (c.containsKey("holder_pq")) m["holder_pq"] = c["holder_pq"]
         return m
     }
 
@@ -276,8 +309,31 @@ object Pca {
         return body
     }
 
+    private val HOLDER_PQ_DOMAIN = "atlas-pca/holder-pq/v1\u0000".toByteArray(StandardCharsets.UTF_8)
+
+    /** holder_pq commitment: b64u(sha256(domain || utf8(pq_pk string))). Mirrors holderPqCommitment in capability.ts. */
+    fun holderPqCommitment(pqPk: String): String = b64(sha(HOLDER_PQ_DOMAIN, pqPk.toByteArray(StandardCharsets.UTF_8)))
+
+    /** F-2: a PQ-key suite (ml-dsa-65 / hybrid) is accepted only under the pq_pk the signer's holder committed to. Null when fine. */
+    private fun pqBindingError(alg: Any?, algPresent: Boolean, pqPk: Any?, committed: Any?, label: String): String? {
+        val suite = Pq.resolveSigAlg(alg, algPresent)
+        if (suite == null || !suite.needsPqPk) return null
+        if (committed !is String)
+            return "$label: suite '${suite.alg}' needs a PQ key bound to the signer, but the signer's holder carries no holder_pq commitment (unbound PQ keys are rejected; F-2)"
+        if (pqPk !is String || holderPqCommitment(pqPk) != committed)
+            return "$label: pq_pk does not match the signer's committed holder_pq (F-2)"
+        return null
+    }
+
+    /** allowedSuites policy (absent alg == ed25519); a null list means no policy, an empty list refuses everything. */
+    private fun suitePolicyError(alg: Any?, algPresent: Boolean, label: String, allowed: List<String>?): String? {
+        if (allowed == null) return null
+        val a: String? = if (!algPresent) "ed25519" else alg as? String
+        return if (a != null && allowed.contains(a)) null else "$label: signature suite is not allowed by this verifier's suite policy"
+    }
+
     /** Returns "" when OK, else an error label. Suite-agile: an unknown hop alg fails closed before any hashing. */
-    private fun checkSig(c: Map<String, Any?>, signer: String, label: String): String {
+    private fun checkSig(c: Map<String, Any?>, signer: String, label: String, pq: PinnedPq?): String {
         val body = signableHopBody(c) ?: return "$label: unknown signature alg '${c["alg"]}'"
         val digest = try {
             hashCanonical(body)
@@ -290,23 +346,88 @@ object Pca {
         val raw = decodeB64uStrict(bd, 32) ?: return "$label: bad signature (not signed by expected key)"
         // Suite-agile hop verification (mirrors verifyLeafSuite): ed25519 == verifyB64u(signer, msg, sig);
         // hybrid requires BOTH the Ed25519 `sig` (under `signer`) AND the ML-DSA `pq_sig` (under `pq_pk`);
-        // pure ml-dsa-65 verifies `sig` under `pq_pk`. The signer is the expected Ed25519 key.
-        val ok = Pq.verifyLeafSuite(c["alg"], c.containsKey("alg"), signer, c["pq_pk"], concat(CAP_DOMAIN, raw), c["sig"], c["pq_sig"])
+        // pure ml-dsa-65 verifies `sig` under the resolved `pq` key (never the hop's own pq_pk). The signer is the expected Ed25519 key.
+        val ok = Pq.verifySuite(c["alg"], c.containsKey("alg"), signer, pq, concat(CAP_DOMAIN, raw), c["sig"], c["pq_sig"])
         if (!ok) return "$label: bad signature (not signed by expected key)"
         return ""
     }
 
-    /** Returns "" when valid, else the failure reason. The 16-hop cap is enforced BEFORE any signature work. */
-    fun verifyChain(chain: List<Any?>, expectedRootIssuer: String, haveIssuer: Boolean): String {
+    const val ROOT_PQ_PIN_REASON_PREFIX = "hop 0: root suite '"
+
+    private fun rootPqPinReason(alg: String): String =
+        "hop 0: root suite '$alg' needs a PQ key pinned for the root issuer (policy.pqPins) or the verifier's stored grant " +
+            "(policy.trustedRoot); the root's own pq_pk proves nothing about who issued it (R3-01)"
+
+    /**
+     * The root hop has no parent holding a holder_pq commitment, so a non-ed25519 root's PQ key must come from a verifier-side
+     * authority: the verifier's stored copy of this very grant ([trustedRoot], same content hash) or a pin for root.issuer.
+     * Mirrors rootPq in capability.ts. Returns the key (or null for an Ed25519 root) and, when refused, the reason.
+     */
+    private fun resolveRootPq(root: Map<String, Any?>, pqPins: Map<String, Any?>?, trustedRoot: Map<String, Any?>?): Pair<PinnedPq?, String?> {
+        val suite = Pq.resolveSigAlg(root["alg"], root.containsKey("alg"))
+        if (suite == null || !suite.needsPqPk) return Pair(null, null)
+        val pk = root["pq_pk"]
+        val trusted: String? = if (trustedRoot != null && pk is String) {
+            try { if (capHash(trustedRoot) == capHash(root)) pk else null } catch (ex: RuntimeException) { null }
+        } else null
+        val issuer = root["issuer"] as? String
+        val key = PinnedPq.resolve(issuer, pk, pqPins = pqPins, trustedPk = trusted)
+        return if (key == null) Pair(null, rootPqPinReason(suite.alg)) else Pair(key, null)
+    }
+
+    /**
+     * Returns "" when valid, else the failure reason. The 16-hop cap is enforced BEFORE any signature work. A non-ed25519
+     * (pure-PQ or hybrid) ROOT is accepted only if [pqPins] maps `root.issuer` to the root's own `pq_pk`, or [trustedRoot]
+     * is the root itself (the verifier's own stored grant); otherwise it is refused (R4-01).
+     */
+    fun verifyChain(
+        chain: List<Any?>,
+        expectedRootIssuer: String,
+        haveIssuer: Boolean,
+        allowedSuites: List<String>? = null,
+        pqPins: Map<String, Any?>? = null,
+        trustedRoot: Map<String, Any?>? = null,
+    ): String =
+        // TOTAL (R6-05): a hostile chain is a refusal, never an exception.
+        try {
+            verifyChainUnchecked(chain, expectedRootIssuer, haveIssuer, allowedSuites, pqPins, trustedRoot)
+        } catch (ex: RuntimeException) {
+            "malformed capability chain: ${ex.javaClass.simpleName}"
+        }
+
+    /**
+     * Mirrors `wellTyped` in capability.ts: id/issuer/holder/body_digest/sig are strings; alg/pq_pk/pq_sig/holder_pq/parent are
+     * absent or strings (JSON null is NOT absent); caveats is a list of objects each with a string `type`.
+     */
+    internal fun wellTyped(o: Any?): Boolean {
+        if (o !is Map<*, *>) return false
+        for (k in listOf("id", "issuer", "holder", "body_digest", "sig")) if (o[k] !is String) return false
+        for (k in listOf("alg", "pq_pk", "pq_sig", "holder_pq", "parent")) if (o.containsKey(k) && o[k] !is String) return false
+        val cv = o["caveats"] as? List<*> ?: return false
+        return cv.all { it is Map<*, *> && it["type"] is String }
+    }
+
+    private fun verifyChainUnchecked(
+        chain: List<Any?>,
+        expectedRootIssuer: String,
+        haveIssuer: Boolean,
+        allowedSuites: List<String>?,
+        pqPins: Map<String, Any?>?,
+        trustedRoot: Map<String, Any?>?,
+    ): String {
         if (chain.isEmpty()) return "empty chain"
         if (chain.size > MAX_CHAIN_HOPS) return "chain too long (max $MAX_CHAIN_HOPS hops)"
+        if (caveatLimitExceeded(chain)) return CAVEAT_LIMIT_REASON
         for (i in chain.indices)
-            if (chain[i] !is Map<*, *>) return "hop $i: malformed capability"
+            if (!wellTyped(chain[i])) return "hop $i: malformed capability"
         val root = asMap(chain[0])
         if (root.containsKey("parent")) return "hop 0: root must not have a parent"
         if (haveIssuer && root["issuer"] != expectedRootIssuer)
             return "hop 0: root issuer is not the expected principal"
-        var e = checkSig(root, asStr(root["issuer"]), "hop 0")
+        suitePolicyError(root["alg"], root.containsKey("alg"), "hop 0", allowedSuites)?.let { return it }
+        val (rootPq, rootErr) = resolveRootPq(root, pqPins, trustedRoot)
+        if (rootErr != null) return rootErr
+        var e = checkSig(root, asStr(root["issuer"]), "hop 0", rootPq)
         if (e.isNotEmpty()) return e
         for (i in 1 until chain.size) {
             val label = "hop $i"
@@ -319,7 +440,9 @@ object Pca {
             }
             if (c["parent"] != ph) return "$label: broken parent link"
             if (c["issuer"] != parent["holder"]) return "$label: issuer is not the parent's bound holder"
-            e = checkSig(c, asStr(parent["holder"]), label)
+            suitePolicyError(c["alg"], c.containsKey("alg"), label, allowedSuites)?.let { return it }
+            pqBindingError(c["alg"], c.containsKey("alg"), c["pq_pk"], parent["holder_pq"], label)?.let { return it }
+            e = checkSig(c, asStr(parent["holder"]), label, PinnedPq.resolve(parent["holder"] as? String, c["pq_pk"], holderPq = parent["holder_pq"]))
             if (e.isNotEmpty()) return e
             val pc = asList(parent["caveats"])
             val cc = asList(c["caveats"])
@@ -355,7 +478,7 @@ object Pca {
      * Closed capability-hop key set (parent optional). The B4 crypto-agility fields (alg/pq_pk/pq_sig) are
      * additive on a hop exactly as at the top level: absent alg == ed25519 (pq_pk/pq_sig forbidden, byte-identical).
      */
-    private val CAP_KEYS = listOf("id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig")
+    private val CAP_KEYS = listOf("id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig", "holder_pq")
 
     private fun isObj(o: Any?): Boolean = o is Map<*, *>
     private fun isStr(o: Any?): Boolean = o is String
@@ -448,6 +571,8 @@ object Pca {
                 if (hopSigWire != null) return "cap_chain[$i]: $hopSigWire"
                 if (c.containsKey("parent") && decodeB64uStrict(c["parent"], 32) == null)
                     return "cap_chain[$i].parent is not canonical base64url (32 bytes)"
+                if (c.containsKey("holder_pq") && decodeB64uStrict(c["holder_pq"], 32) == null)
+                    return "cap_chain[$i].holder_pq is not canonical base64url (32 bytes)"
                 if (c["caveats"] !is List<*>) return "cap_chain[$i].caveats must be an array of {type,...} objects"
                 for (cv in c["caveats"] as List<Any?>)
                     if (!isObj(cv) || !isStr((cv as Map<String, Any?>)["type"]))
@@ -511,7 +636,12 @@ object Pca {
     }
 
     /** Verify raw PCActn JSON text: strict-profile parse first (any failure, or a non-object, is a wire failure). */
-    fun verifyPcactnJson(text: String, grant: Map<String, Any?>, now: Long, audience: Audience): Verdict {
+    fun verifyPcactnJson(text: String, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null): Verdict {
+        if (artifactTooLarge(text)) { // FIRST: before any parsing
+            val big = Verdict()
+            big.fail("wire", ARTIFACT_SIZE_REASON)
+            return big
+        }
         val parsed: Any?
         try {
             parsed = Json.parse(text)
@@ -520,14 +650,22 @@ object Pca {
             v.fail("wire", "strict JSON: ${e.message}")
             return v
         }
-        return verifyPcactn(parsed, grant, now, audience)
+        return verifyPcactn(parsed, grant, now, audience, allowedSuites)
     }
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
      * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter. allow = every check true.
      */
-    fun verifyPcactn(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience): Verdict {
+    fun verifyPcactn(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null): Verdict =
+        // TOTAL (R6-05): any residual fault on hostile input is a terminal wire refusal, never an exception.
+        try {
+            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites)
+        } catch (ex: RuntimeException) {
+            Verdict().also { it.fail("wire", "malformed input (${ex.javaClass.simpleName})") }
+        }
+
+    private fun verifyPcactnUnchecked(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>?): Verdict {
         val v = Verdict()
         val wire = validateWireV2(pcactn)
         if (wire != null) {
@@ -563,8 +701,9 @@ object Pca {
             val why: String = when {
                 chain.isEmpty() -> "empty chain"
                 chain.size > MAX_CHAIN_HOPS -> "chain too long (max $MAX_CHAIN_HOPS hops)"
+                caveatLimitExceeded(chain) -> CAVEAT_LIMIT_REASON
                 capHash(asMap(chain[0])) != capHash(grant) -> "chain root is not the grant"
-                else -> verifyChain(chain, asStr(grant["issuer"]), grant["issuer"] is String)
+                else -> verifyChain(chain, asStr(grant["issuer"]), grant["issuer"] is String, allowedSuites, null, grant) // chain[0] == grant was checked above
             }
             if (why.isEmpty()) v.checks["chain"] = true else v.fail("chain", why)
 
@@ -592,9 +731,13 @@ object Pca {
             // (no `alg`) this is byte-identical to the classical strict-Ed25519 path under the leaf holder.
             var sigOk = false
             if (chain.isNotEmpty()) {
-                val holder = asStr(asMap(chain[chain.size - 1])["holder"])
-                sigOk = Pq.verifyLeafSuite(
-                    p["alg"], p.containsKey("alg"), holder, p["pq_pk"],
+                val leafCap = asMap(chain[chain.size - 1])
+                val holder = asStr(leafCap["holder"])
+                val lerr = suitePolicyError(p["alg"], p.containsKey("alg"), "leaf", allowedSuites)
+                    ?: pqBindingError(p["alg"], p.containsKey("alg"), p["pq_pk"], leafCap["holder_pq"], "leaf")
+                if (lerr == null) sigOk = Pq.verifySuite(
+                    p["alg"], p.containsKey("alg"), holder,
+                    PinnedPq.resolve(leafCap["holder"] as? String, p["pq_pk"], holderPq = leafCap["holder_pq"]),
                     thresholdMessage(p), p["sig"], p["pq_sig"],
                 )
             }

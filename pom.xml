@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Mutation-testing build only (PIT over the compiled native verifier). The module itself builds with Gradle (Android); this
+     pom compiles ONLY the verifier package + the mutation harness and has no effect on the Gradle build. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId><artifactId>pca-kotlin-mutation</artifactId><version>0</version>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kotlin.version>2.0.21</kotlin.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>${kotlin.version}</version></dependency>
+    <dependency><groupId>org.bouncycastle</groupId><artifactId>bcprov-jdk18on</artifactId><version>1.80</version></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>src/main/kotlin/net/atlasauth/pca/verifier</sourceDirectory>
+    <testSourceDirectory>src/mutation/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>
+        <configuration><jvmTarget>17</jvmTarget></configuration>
+        <executions>
+          <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals>
+            <configuration><sourceDirs><sourceDir>${project.basedir}/src/main/kotlin/net/atlasauth/pca/verifier</sourceDir></sourceDirs></configuration></execution>
+          <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals>
+            <configuration><sourceDirs>
+              <sourceDir>${project.basedir}/src/mutation/kotlin</sourceDir>
+              <sourceDir>${project.basedir}/src/test/kotlin/net/atlasauth/pca/verifier</sourceDir>
+            </sourceDirs></configuration></execution>
+        </executions>
+      </plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version><configuration><argLine>-Xss16m -Xmx2g</argLine></configuration></plugin>
+      <plugin><groupId>org.pitest</groupId><artifactId>pitest-maven</artifactId><version>1.17.1</version>
+        <configuration>
+          <targetClasses><param>net.atlasauth.pca.verifier.*</param></targetClasses>
+          <targetTests><param>net.atlasauth.pca.verifier.*</param></targetTests>
+          <mutators><mutator>ALL</mutator></mutators>
+          <avoidCallsTo><avoidCallsTo>kotlin.jvm.internal.Intrinsics</avoidCallsTo></avoidCallsTo>
+          <timeoutConstant>8000</timeoutConstant>
+          <outputFormats><format>XML</format><format>HTML</format></outputFormats>
+          
+          
+          <failWhenNoMutations>false</failWhenNoMutations>
+          <jvmArgs><arg>-Xss16m</arg><arg>-Xmx1500m</arg></jvmArgs>
+        </configuration></plugin>
+    </plugins>
+  </build>
+</project>

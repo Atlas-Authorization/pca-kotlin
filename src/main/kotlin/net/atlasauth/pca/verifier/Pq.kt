@@ -132,6 +132,9 @@ object Pq {
      *  - ml-dsa-65: ML-DSA-65 `sig` under `pq_pk`.
      *  - hybrid:    Ed25519 `sig` under `holder` AND ML-DSA-65 `pq_sig` under `pq_pk`, both over `msg`;
      *               BOTH must verify.
+     * CALLER-VOUCHED: this overload verifies under the ARTIFACT'S OWN `pq_pk`, so it proves nothing about who issued
+     * the artifact. It is for surfaces whose key is authorised elsewhere (threshold shares, the `pq_artifact` conformance
+     * primitives). The chain and the PCActn leaf never call it; they go through [verifySuite] with a [PinnedPq].
      */
     fun verifyLeafSuite(
         alg: Any?,
@@ -141,15 +144,29 @@ object Pq {
         msg: ByteArray,
         sig: Any?,
         pqSig: Any?,
+    ): Boolean = verifySuite(alg, algPresent, holder, PinnedPq.resolve(null, pqPk, trustedPk = pqPk as? String), msg, sig, pqSig)
+
+    /**
+     * The key-authorised seam. The PQ half verifies ONLY under [pq] (a [PinnedPq], minted solely by [PinnedPq.resolve]), never
+     * under a `pq_pk` read off the artifact. A missing key fails closed. The chain hops and the PCActn leaf call THIS.
+     */
+    internal fun verifySuite(
+        alg: Any?,
+        algPresent: Boolean,
+        holder: String?,
+        pq: PinnedPq?,
+        msg: ByteArray,
+        sig: Any?,
+        pqSig: Any?,
     ): Boolean {
         val suite = resolveSigAlg(alg, algPresent) ?: return false
         if (sig !is String) return false
         return when (suite.alg) {
             "ed25519" -> Pca.verifyB64u(holder, msg, sig)
-            "ml-dsa-65" -> mlDsa65VerifyB64u(pqPk, msg, sig)
+            "ml-dsa-65" -> pq != null && mlDsa65VerifyB64u(pq.key, msg, sig)
             "hybrid-ed25519-ml-dsa-65" -> {
                 if (pqSig !is String) return false
-                Pca.verifyB64u(holder, msg, sig) && mlDsa65VerifyB64u(pqPk, msg, pqSig)
+                Pca.verifyB64u(holder, msg, sig) && pq != null && mlDsa65VerifyB64u(pq.key, msg, pqSig)
             }
             else -> false
         }
@@ -163,4 +180,37 @@ object Pq {
      */
     fun verifyArtifactSignature(alg: String?, edPub: String?, pqPk: Any?, msg: ByteArray, sig: Any?, pqSig: Any?): Boolean =
         verifyLeafSuite(alg, true, edPub, pqPk, msg, sig, pqSig)
+}
+
+/**
+ * An opaque PQ verification key (R3-01 choke point). The type and its resolver are MODULE-INTERNAL (R5-B2k: a
+ * public resolver let any caller mint a pinned key from the artifact's own `pq_pk`). The constructor is private: the only way to obtain one is
+ * [PinnedPq.resolve], so [Pq.verifySuite] cannot be reached with a `pq_pk` read straight off the artifact being verified.
+ */
+internal class PinnedPq private constructor(val key: String, val source: String) {
+    companion object {
+        /**
+         * THE choke point (R3-01), mirroring resolvePqVerifyKey in packages/pca/src/pq.ts. Returns the key to verify under, or
+         * null (REFUSE) when no verifier-side authority vouches for the artifact's `pq_pk`:
+         *  1. [trustedPk]: a key the verifier itself holds (the stored grant). Used as is.
+         *  2. [pqPins]`[identity]` (own entry only): the artifact key MUST equal the pin; a differing pin is a refusal.
+         *  3. [holderPq]: the artifact key must hash to the signer's committed `holder_pq` (F-2).
+         * Natives have no allowUnboundPq: an artifact's own key is never enough.
+         */
+        fun resolve(
+            identity: String?,
+            artifactPk: Any?,
+            holderPq: Any? = null,
+            pqPins: Map<String, Any?>? = null,
+            trustedPk: String? = null,
+        ): PinnedPq? {
+            if (trustedPk != null && trustedPk.isNotEmpty()) return PinnedPq(trustedPk, "trusted")
+            if (artifactPk !is String || artifactPk.isEmpty()) return null
+            if (pqPins != null && identity != null && pqPins.containsKey(identity)) {
+                return if (pqPins[identity] == artifactPk) PinnedPq(artifactPk, "pin") else null
+            }
+            if (holderPq is String && Pca.holderPqCommitment(artifactPk) == holderPq) return PinnedPq(artifactPk, "holder-commitment")
+            return null
+        }
+    }
 }

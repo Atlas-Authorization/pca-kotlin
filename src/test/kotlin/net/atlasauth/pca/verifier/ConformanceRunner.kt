@@ -33,6 +33,46 @@ private val ALL_REGISTERED_SUITES = setOf(
     "hybrid-ed25519-slh-dsa-sha2-128f", "hybrid-ed25519-slh-dsa-sha2-256s",
 )
 
+/** primitives.depth `expand`: the marker string (value) / substring (text) becomes `levels` nested arrays around `leaf`, built iteratively. */
+@Suppress("UNCHECKED_CAST")
+private fun expandDepthInput(api: String, input: Any?, ex: Map<String, Any?>?): Any? {
+    if (ex == null) return input
+    val marker = ex["marker"] as String
+    val levels = Json.asLong(ex["levels"]).toInt()
+    val leaf = ex["leaf"]
+    if (api == "pcactn_json" || api == "json_parse") {
+        val i = LinkedHashMap(input as Map<String, Any?>)
+        val text = i["text"] as String
+        val at = text.indexOf(marker)
+        i["text"] = text.substring(0, at) + "[".repeat(levels) + Json.canonicalize(leaf) + "]".repeat(levels) + text.substring(at + marker.length)
+        return i
+    }
+    var nest: Any? = leaf
+    repeat(levels) { nest = arrayListOf(nest) }
+    val st = ArrayDeque<Any?>()
+    st.addLast(input)
+    while (st.isNotEmpty()) { // the input itself is shallow; replace the single marker value in place
+        when (val o = st.removeLast()) {
+            is MutableMap<*, *> -> for (e in (o as MutableMap<String, Any?>).entries) { if (e.value == marker) e.setValue(nest) else st.addLast(e.value) }
+            is MutableList<*> -> { val l = o as MutableList<Any?>; for (k in l.indices) { if (l[k] == marker) l[k] = nest else st.addLast(l[k]) } }
+        }
+    }
+    return input
+}
+
+/** primitives.depth verdict per api (true == accepted / verifies / counts / parses). */
+@Suppress("UNCHECKED_CAST")
+private fun depthVerdict(api: String, input: Any?): Boolean = when (api) {
+    "chain" -> { val i = input as Map<String, Any?>; Pca.verifyChain(i["chain"] as List<Any?>, i["expected_root_issuer"] as String, true) == "" }
+    "threshold_share" -> Threshold.verifyShareEntry(input)
+    "pcactn_json" -> {
+        val i = input as Map<String, Any?>
+        Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String)).allow
+    }
+    "json_parse" -> try { Json.parse((input as Map<String, Any?>)["text"] as String); true } catch (e: IllegalArgumentException) { false }
+    else -> throw IllegalStateException("unknown depth api $api")
+}
+
 @Suppress("UNCHECKED_CAST")
 private fun load(p: String): Map<String, Any?> =
     Json.parseLenient(Files.readString(Path.of(p))) as Map<String, Any?>
@@ -67,7 +107,20 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
     val dir = confDir.trimEnd('/') + "/"
     val ceDir = counterexampleDir.trimEnd('/') + "/"
 
-    val doc = load(dir + "vectors.json")
+    val core = load(dir + "vectors.json")
+    // Optional: also run the FULL adversarial set. PCA_CONFORMANCE_ADV names an uncompressed copy
+    // (`gunzip -c packages/pca/conformance/vectors-adversarial.json.gz > $PCA_CONFORMANCE_ADV`); the core's sampled adv-*
+    // vectors are replaced by the full set and the adversarial json_parse/b64u/canonical rows are appended to the base ones.
+    val advPath = System.getenv("PCA_CONFORMANCE_ADV")
+    val doc: Map<String, Any?> = if (advPath.isNullOrEmpty()) core else {
+        val adv = load(advPath)
+        val base = mapOf("json_parse" to 54, "b64u" to 21, "canonical" to 5)
+        val prim = (core["primitives"] as Map<String, Any?>).toMutableMap()
+        val advPrim = adv["primitives"] as Map<String, Any?>
+        for ((k, n) in base) prim[k] = (prim[k] as List<Any?>).take(n) + (advPrim[k] as List<Any?>)
+        val coreVs = (core["vectors"] as List<Any?>).filter { !((it as Map<String, Any?>)["name"] as String).startsWith("adv-") }
+        core.toMutableMap().also { it["primitives"] = prim; it["vectors"] = coreVs + (adv["vectors"] as List<Any?>) }
+    }
     check(Json.asLong(doc["format"]) == 2L && Json.asLong(doc["ver"]) == 2L, "format-2 vectors")
     check(doc["agent_leaf_binding"] == "2.1", "agent_leaf_binding == 2.1")
     val vs = doc["vectors"] as List<Any?>
@@ -99,9 +152,10 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         val aud = ctx["aud"]
         val audience = if (aud is String) Pca.Audience.Of(aud) else Pca.Audience.Unset
         val grant = v["grant"] as Map<String, Any?>
+        val allowedSuites = (ctx["allowed_suites"] as? List<*>)?.map { it.toString() }
         val got = if (v.containsKey("pcactn_json"))
-            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience)
-        else Pca.verifyPcactn(v["pcactn"], grant, now, audience)
+            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience, allowedSuites)
+        else Pca.verifyPcactn(v["pcactn"], grant, now, audience, allowedSuites)
         val exp = v["expect"] as Map<String, Any?>
         val wantAllow = exp["allow"]
         check(got.allow == wantAllow, "${v["name"]}: allow=${got.allow} want $wantAllow (${got.reason})")
@@ -219,6 +273,91 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         check(gotValid == wantValid, "pq_artifact ${a["artifact"]}/$alg: verify=$gotValid want $wantValid")
         artRan++
     }
+
+    // ---- standalone chain API: root PQ authority (R4-01) ----------------------------------------------------
+    // primitives.chain_pin[]: Pca.verifyChain(chain, expected_root_issuer, true, allowed_suites, pq_pins, trusted_root). A non-ed25519
+    // ROOT needs a verifier-side pin or the stored grant. The suites involved (ed25519, ml-dsa-65, hybrid) are all implemented here.
+    val chainPins = prim["chain_pin"] as? List<Any?> ?: emptyList()
+    check(chainPins.size >= 25, "primitives.chain_pin: expected >= 25 vectors, got ${chainPins.size}")
+    var cpRan = 0
+    for (x in chainPins) {
+        val v = x as Map<String, Any?>
+        val exp = v["expect"] as Map<String, Any?>
+        val reason = exp["reason"] as? String ?: ""
+        val eri = v["expected_root_issuer"] as? String
+        val got = Pca.verifyChain(
+            v["chain"] as List<Any?>, eri ?: "", eri != null,
+            (v["allowed_suites"] as? List<*>)?.map { it.toString() },
+            v["pq_pins"] as? Map<String, Any?>,
+            v["trusted_root"] as? Map<String, Any?>,
+        )
+        check((got == "") == (exp["ok"] == true), "chain_pin ${v["name"]}: ok=${got == ""} want ${exp["ok"]} ($got)")
+        if (reason.startsWith("hop 0: root suite")) check(got == reason, "chain_pin ${v["name"]}: reason '$got' want '$reason'")
+        cpRan++
+    }
+    println("CHAIN_PIN: $cpRan run of ${chainPins.size}")
+
+    // ---- round 6: whole signer-set validation, signer-set hash, malformed input (gen-conformance-r6.mjs) -------
+    var tsRan = 0
+    var tsSkipped = 0
+    var malformedRan = 0
+    for (x in prim["threshold_set"] as List<Any?>) {
+        val e = x as Map<String, Any?>
+        val req = e["requires"] as? String
+        if (req != null && req !in IMPLEMENTED_SUITES) { tsSkipped++; continue }
+        val want = e["valid"] == true
+        val got = try { Threshold.verifyShareEntry(e) } catch (th: Throwable) { check(false, "threshold_set ${e["name"]}: THREW $th"); continue }
+        check(got == want, "threshold_set ${e["name"]}: verify=$got want $want")
+        tsRan++
+    }
+    for (x in prim["signer_set_hash"] as List<Any?>) {
+        val e = x as Map<String, Any?>
+        val h = Threshold.signerSetHashB64u(e["signer_set"])
+        check(h == e["hash"], "signer_set_hash ${e["name"]}: got $h")
+    }
+    for (x in prim["malformed"] as List<Any?>) {
+        val m = x as Map<String, Any?>
+        val nm = m["name"].toString()
+        val input = m["input"]
+        malformedRan++
+        try {
+            val accepted = when (m["api"]) {
+                "chain" -> {
+                    val i = input as Map<String, Any?>
+                    Pca.verifyChain(i["chain"] as List<Any?>, i["expected_root_issuer"] as String, true) == ""
+                }
+                "threshold_share" -> Threshold.verifyShareEntry(input)
+                "pcactn_json" -> {
+                    val i = input as Map<String, Any?>
+                    Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String)).allow
+                }
+                else -> true
+            }
+            check(!accepted, "malformed $nm: accepted")
+        } catch (th: Throwable) {
+            check(false, "malformed $nm: THREW $th")
+        }
+    }
+    check(tsRan + tsSkipped >= 55 && malformedRan >= 80, "round-6 primitives present (threshold_set ${tsRan + tsSkipped}, malformed $malformedRan)")
+    println("ROUND6: threshold_set $tsRan run, $tsSkipped skipped; malformed $malformedRan")
+
+    // ---- nesting depth (gen-conformance-depth.mjs): limit-1 / limit / limit+1 and a huge (expanded) depth per entry point.
+    // Each case runs on a 512 KiB-stack thread (a typical servlet worker): the verdict must equal `valid` and nothing may escape.
+    var depthRan = 0
+    for (x in prim["depth"] as List<Any?>) {
+        val d = x as Map<String, Any?>
+        val nm = d["name"].toString()
+        val api = d["api"].toString()
+        val input = expandDepthInput(api, d["input"], d["expand"] as Map<String, Any?>?)
+        val want = d["valid"] == true
+        var out: Any? = null
+        val t = Thread(null, { out = try { depthVerdict(api, input) } catch (th: Throwable) { th } }, "depth", 512L * 1024)
+        t.start(); t.join()
+        if (out is Throwable) check(false, "depth $nm: THREW $out") else check(out == want, "depth $nm: verdict=$out want $want")
+        depthRan++
+    }
+    check(depthRan >= 20, "depth primitives present ($depthRan)")
+    println("DEPTH: $depthRan run")
 
     // ---- report --------------------------------------------------------------------------------------------
     println("VECTORS: ${ran + skipped} total = $ran run (${ran - vecFails} passed, $vecFails failed), $skipped skipped")

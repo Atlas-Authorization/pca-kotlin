@@ -70,6 +70,84 @@ object Threshold {
         )
     }
 
+    /** Registered PQ public-key lengths of every suite (ml-dsa-65/87, slh-dsa-128f/256s, fn-dsa-512/1024, less-cat1). */
+    private val PQ_PK_LENGTHS = setOf(1952, 2592, 32, 64, 897, 1793, 97484)
+    private val ROLES = setOf("agent", "guardian", "principal")
+
+    /**
+     * R6-03: the reference's signer-set validation (decideThreshold BuildReg). Every entry is an object with a known role
+     * (case-sensitive) and a canonical 32-byte publicKey; a PRESENT pq_pk (JSON null is present) is canonical base64url of a
+     * registered PQ key length; one key per role; one role per key; a duplicate (role, key) only with the same pq_pk.
+     * Returns role -> (publicKey, pq_pk or null), or null when the set is malformed.
+     */
+    internal fun validatedRegistry(signerSet: List<Any?>): Map<String, Pair<String, String?>>? {
+        val reg = LinkedHashMap<String, Pair<String, String?>>()
+        for (o in signerSet) {
+            if (o !is Map<*, *>) return null
+            val role = o["role"] as? String ?: return null
+            if (role !in ROLES) return null
+            val pk = o["publicKey"] as? String ?: return null
+            if (Pca.decodeB64uStrict(pk, 32) == null) return null
+            var pq: String? = null
+            if (o.containsKey("pq_pk")) {
+                val ps = o["pq_pk"] as? String ?: return null
+                val pb = Pca.decodeB64uStrict(ps, -1) ?: return null
+                if (pb.size !in PQ_PK_LENGTHS) return null
+                pq = ps
+            }
+            val prev = reg[role]
+            if (prev != null) {
+                if (prev.first != pk) return null   // two keys for one role
+                if (prev.second != pq) return null  // duplicate (role, key) with a conflicting pq_pk
+                continue
+            }
+            if (reg.values.any { it.first == pk }) return null // one key under two roles
+            reg[role] = Pair(pk, pq)
+        }
+        return reg
+    }
+
+    /** The signer-set hash (base64url) of a raw signer set; null when it is not a list of objects with string role / publicKey. */
+    fun signerSetHashB64u(signerSet: Any?): String? = try {
+        if (signerSet !is List<*> || signerSet.any { it !is Map<*, *> || it["role"] !is String || it["publicKey"] !is String }) null
+        else Pca.b64(signerSetHash(signerSet))
+    } catch (e: RuntimeException) {
+        null
+    }
+
+    /**
+     * Verify a `primitives.threshold_share[]`-shaped ENTRY `{role, t, signer_set, threshold_message, share}` of ANY JSON shape.
+     * TOTAL (R6-05): anything malformed is `false`, never an exception. `t` must be exactly 1, 2 or 3.
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun verifyShareEntry(entry: Any?): Boolean = try {
+        val e = entry as? Map<String, Any?>
+        val role = e?.get("role") as? String
+        val t = exactT(e?.get("t"))
+        val set = e?.get("signer_set") as? List<Any?>
+        val tm = if (e == null) null else Pca.decodeB64uStrict(e["threshold_message"], -1)
+        val share = e?.get("share") as? Map<String, Any?>
+        if (role == null || t == null || set == null || tm == null || share == null) false
+        else verifyShare(role, tm, set, t, share)
+    } catch (ex: RuntimeException) {
+        false
+    }
+
+    /** 1, 2 or 3 when [o] is a JSON number of exactly that value, else null. */
+    internal fun exactT(o: Any?): Int? {
+        val d = try {
+            when (o) {
+                is Json.Num -> java.math.BigDecimal(o.raw)
+                is Boolean -> return null
+                is Number -> java.math.BigDecimal(o.toString())
+                else -> return null
+            }
+        } catch (e: RuntimeException) {
+            return null
+        }
+        return (1..3).firstOrNull { d.compareTo(java.math.BigDecimal.valueOf(it.toLong())) == 0 }
+    }
+
     /**
      * Verify a single EXPLICIT threshold share by RECOMPUTING the role/set/t-bound [shareMessage] from the entry
      * (never trusting a precomputed `share_message`) and checking `share.sig` over it under `share.publicKey`
@@ -83,9 +161,34 @@ object Threshold {
      */
     fun verifyShare(role: String, thresholdMessage: ByteArray, signerSet: List<Any?>, t: Int, share: Map<String, Any?>): Boolean {
         return try {
-            val msg = shareMessage(role, thresholdMessage, signerSet, t, share["alg"], share.containsKey("alg"))
+            if (t !in 1..3) return false // R6-04: exactly 1, 2 or 3
+            // R6-03: validate the WHOLE signer set like the reference before looking at the share.
+            val reg = validatedRegistry(signerSet) ?: return false
+            // share.role is required and must name the verified role (reference: a share without a string role is malformed).
+            if (share["role"] !is String || share["role"] != role) return false
+            // R5-A1: the share must be for the ONE key the verifier's signer set registers for `role`; the
+            // share's own publicKey / pq_pk never vouch for themselves.
             val publicKey = Pca.asStr(share["publicKey"])
-            Pq.verifyLeafSuite(share["alg"], share.containsKey("alg"), publicKey, share["pq_pk"], msg, share["sig"], share["pq_sig"])
+            val r = reg[role] ?: return false
+            if (r.first != publicKey) return false
+            val regPq: String? = r.second
+            val roleHasPq = regPq != null
+            val algPresent = share.containsKey("alg")
+            val suite = Pq.resolveSigAlg(share["alg"], algPresent)
+            // A share that NAMES a pq_pk must name exactly its role's registered one (any suite; a role registering
+            // none has nothing it could equal). The key used is always the registered one.
+            if (share.containsKey("pq_pk") && (regPq == null || share["pq_pk"] != regPq)) return false
+            // R6-02: a role that registers a pq_pk REQUIRES a PQ (pure or hybrid) share; an ed25519-only share
+            // for it is refused (otherwise an Ed25519 break would still forge the role).
+            if (roleHasPq && suite != null && suite.alg == "ed25519") return false
+            var pqPk: Any? = share["pq_pk"]
+            if (suite == null || suite.alg != "ed25519") {
+                // PQ key = the signer set's registered pq_pk, never the share's own.
+                if (regPq == null) return false
+                pqPk = regPq
+            }
+            val msg = shareMessage(role, thresholdMessage, signerSet, t, share["alg"], algPresent)
+            Pq.verifyLeafSuite(share["alg"], algPresent, publicKey, pqPk, msg, share["sig"], share["pq_sig"])
         } catch (e: RuntimeException) {
             false // fail-closed: a malformed share never counts as a valid one
         }
