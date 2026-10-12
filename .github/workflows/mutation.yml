@@ -1,0 +1,118 @@
+name: Mutation
+
+# Mutation testing of the verifier with PIT (pom.xml: ALL mutators, oracle = MutationHarness + the JUnit suites), split
+# into shards by target class (the last shard takes every class the others do not, so the shards partition the pom's
+# targetClasses exactly). PIT reports are converted with the flagship's tools/pca-audit/native-mutation/pit-convert.mjs and
+# the merge job checks the survivors (SURVIVED + NO_COVERAGE) against the equivalent-mutant ledger: it passes when every
+# survivor is a ledgered equivalent and no ledger entry is stale. Runs on demand and on ci/** branches (the
+# release-candidate check), never on main pushes.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CRATE: kotlin-pca
+  SHARDS: '6'
+  P: net.atlasauth.pca.verifier
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}/6 (${{ matrix.classes }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, classes: 'Pca' }
+          - { shard: 2, classes: 'Pca$*' }
+          - { shard: 3, classes: 'Json*' }
+          - { shard: 4, classes: 'Threshold*' }
+          - { shard: 5, classes: 'Pq*,Caveats*' }
+          - { shard: 6, classes: 'rest' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Mutate
+        working-directory: ${{ env.MONO }}/sdks/kotlin-pca
+        env:
+          CLASSES: ${{ matrix.classes }}
+        run: |
+          # the shard's class set replaces the pom's targetClasses (an explicit pom setting wins over -DtargetClasses)
+          python3 - <<'PY'
+          import os, re
+          p, c = os.environ["P"], os.environ["CLASSES"]
+          shards = ["Pca", "Pca$*", "Json*", "Threshold*", "Pq*,Caveats*"]
+          par = lambda xs: "".join(f"<param>{p}.{x}</param>" for x in xs)
+          if c == "rest":
+              block = f"<targetClasses><param>{p}.*</param></targetClasses><excludedClasses>{par(','.join(shards).split(','))}</excludedClasses>"
+          else:
+              block = f"<targetClasses>{par(c.split(','))}</targetClasses>"
+          s = open("pom.xml").read()
+          s2 = re.sub(r"<targetClasses>.*?</targetClasses>", lambda m: block, s, count=1, flags=re.S)
+          assert s2 != s, "targetClasses not found in pom.xml"
+          open("pom.xml", "w").write(s2)
+          print(block)
+          PY
+          mvn -B -ntp -q test-compile
+          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=4 -DtimestampedReports=false | tail -40
+      - name: Report
+        run: |
+          X="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+          [ -n "$X" ] || { echo "::error::no mutations.xml"; exit 1; }
+          node "$MONO/tools/pca-audit/native-mutation/pit-convert.mjs" "$CRATE" "$X" results.json survivors-raw.json
+          node -e '
+            const fs = require("fs"); const r = JSON.parse(fs.readFileSync("results.json", "utf8"));
+            const counts = {}; for (const m of r) counts[m.st] = (counts[m.st] || 0) + 1;
+            const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map(({ status, ...x }) => x);
+            fs.writeFileSync("counts.json", JSON.stringify(counts)); fs.writeFileSync("survivors.json", JSON.stringify(s));
+          '
+          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$SHARDS" --tool=pitest \
+            --counts=counts.json --survivors=survivors.json --out=shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+
+  merge:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship checker + ledger
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+      - name: Merge shards and check the ledger
+        run: >
+          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports
+          --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: survivors-merged
+          path: reports/survivors-merged.json
+          if-no-files-found: ignore
