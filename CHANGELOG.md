@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- Security (policy layer): caveats on the root grant outside the envelope are now evaluated like delegated caveats; new policy_caveats/evaluate_caveats helpers (incl. max_spend). The core verifier still does not evaluate caveats. Kotlin: `Caveats.policyCaveats(grant, chain)` (the grant's caveats minus its first `envelope` caveat, then the caveats the hops appended) and `Caveats.evaluateCaveats(caveats, ctx)` -> `Caveats.Result(ok, failed)` (total; `expires`, `not_before`, `rate`, `max_blast_radius`, `reversibility_max`, `delegation_depth`, `budget_alloc`, and the new `max_spend {usd}`; anything else fails closed). `Pca.verifyPcactn` is unchanged and still treats caveats as opaque. New `primitives.caveat_eval` vectors run in `ConformanceRunner`.
+- Wire: threshold-share signatures are validated per suite (`Pq.validateShareSignatureWire`): `alg` absent = ed25519 (64-byte `sig`, no `pq_sig`), `ml-dsa-65` (3309-byte `sig`, no `pq_sig`), `hybrid-ed25519-ml-dsa-65` (64-byte `sig` + 3309-byte `pq_sig`); a non-string (incl. null) or unknown `alg` is a wire refusal. Before, every share `sig` had to be 64 bytes, so a pure ML-DSA-65 share could not be carried. A share's `pq_pk` is still judged only by the threshold check. Reason text is now `threshold.shares[i]: 'sig' is not canonical base64url (N bytes) for alg '<alg>'`. `ConformanceRunner` skips a vector whose `requires` names a registered suite this verifier does not implement.
+- The strict `PCA-Action` header fix (0.4.1) does not apply: this package has no HTTP middleware (`primitives.pca_header` is reported N/A).
+- Tests: `PqChainTest.explicitEd25519Share` expected a stray `pq_pk` on an ed25519 share to be ignored; since d00dba73 such a share is refused (the test was stale).
+- Version 0.1.0 -> 0.4.1 (`build.gradle.kts`).
+
 ## Unreleased (BREAKING)
 
 - Depth / R6-05 (parity + robustness): every protocol digest (capHash and the hop body digest, Merkle leaves, params / conditions digests, the threshold signer-set hash) now uses the STRICT canonical form, exactly as the reference `hash.ts` `canonicalBytes`. Before, these were hashed under the lenient form, so a hop or leaf signed over out-of-profile bytes (nesting deeper than 32, a lone surrogate, a non-canonical number) verified where the reference refuses it, and a deeply nested (or cyclic) caveat, Merkle leaf or grant overflowed the stack: the `StackOverflowError` escaped `verifyChain` / `verifyInclusion` / `verifyPcactn` (they catch only `RuntimeException`). The public lenient `Json.canonicalize` is capped at `Json.MAX_LENIENT_DEPTH` (512). Shared `primitives.depth` vectors (limit-1 / limit / limit+1 / 100000 per entry point) run in the conformance runner on a 512 KiB stack.

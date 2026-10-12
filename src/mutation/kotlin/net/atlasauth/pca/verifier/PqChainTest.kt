@@ -147,8 +147,9 @@ class PqChainTest {
             val sh = m("role" to "agent", "publicKey" to edPub, "sig" to edSign("agent", msg))
             if (explicit) sh["alg"] = "ed25519"
             assertTrue("explicit=$explicit", Threshold.verifyShare("agent", tm, set, 1, sh))
+            // a pq_pk naming a key its role does not register is refused, any suite (d00dba73; this test was stale)
             sh["pq_pk"] = "ignored-for-ed25519"
-            assertTrue(Threshold.verifyShare("agent", tm, set, 1, sh))
+            assertFalse(Threshold.verifyShare("agent", tm, set, 1, sh))
         }
         assertFalse(Threshold.verifyShare("agent", tm, set, 1, m("role" to "agent", "publicKey" to edPub, "alg" to "ed25519", "sig" to edSign("principal", msg))))
         assertFalse(Threshold.verifyShare("agent", tm, set, 1, m("role" to "agent", "publicKey" to edPub, "alg" to null, "sig" to edSign("agent", msg))))

@@ -139,6 +139,8 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         // Skip iff the vector exercises a REGISTERED suite we do not implement. A bogus/unknown alg
         // (e.g. "ml-dsa-999") is NOT registered, so it still runs and is correctly rejected fail-closed.
         val unsupported = suites.firstOrNull { it in ALL_REGISTERED_SUITES && it !in IMPLEMENTED_SUITES }
+            // 0.4.1: a vector may name the suite it needs in `requires` (e.g. a threshold share under ml-dsa-87).
+            ?: (v["requires"] as? String)?.takeIf { it in ALL_REGISTERED_SUITES && it !in IMPLEMENTED_SUITES }
         if (unsupported != null) {
             skipped++
             skipBySuite[unsupported] = (skipBySuite[unsupported] ?: 0) + 1
@@ -358,6 +360,22 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
     }
     check(depthRan >= 20, "depth primitives present ($depthRan)")
     println("DEPTH: $depthRan run")
+
+    // ---- 0.4.1: policy-layer caveats, root caveats included (primitives.caveat_eval) --------------------------
+    var caveatRan = 0
+    for (x in (prim["caveat_eval"] as? List<Any?>).orEmpty()) {
+        val e = x as Map<String, Any?>
+        val exp = e["expect"] as Map<String, Any?>
+        val r = try { Caveats.evaluateCaveats(Caveats.policyCaveats(e["grant"], e["chain"]), e["context"]) }
+            catch (th: Throwable) { check(false, "caveat_eval ${e["name"]}: THREW $th"); continue }
+        check(r.ok == exp["allow"], "caveat_eval ${e["name"]}: allow=${r.ok} want ${exp["allow"]} ${r.failed}")
+        check(r.failed == exp["failed"], "caveat_eval ${e["name"]}: failed=${r.failed} want ${exp["failed"]}")
+        caveatRan++
+    }
+    check(caveatRan >= 40, "caveat_eval primitives present ($caveatRan)")
+    println("CAVEAT_EVAL: $caveatRan run")
+    // primitives.pca_header is N/A here: this verifier has no HTTP middleware and decodes no PCA-Action header.
+    println("PCA_HEADER: N/A (no HTTP middleware in the Kotlin verifier), ${(prim["pca_header"] as? List<*>)?.size ?: 0} vectors not applicable")
 
     // ---- report --------------------------------------------------------------------------------------------
     println("VECTORS: ${ran + skipped} total = $ran run (${ran - vecFails} passed, $vecFails failed), $skipped skipped")

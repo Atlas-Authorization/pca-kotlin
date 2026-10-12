@@ -6,7 +6,7 @@ plugins {
 // Principal-device step-up module for PCA. Deliberately NOT part of the atlas-android
 // auth SDK: it is a separate artifact with its own tiny dependency set.
 group = "net.atlasauth"
-version = "0.1.0"
+version = "0.4.1"
 
 android {
     namespace = "net.atlasauth.pca.stepup"

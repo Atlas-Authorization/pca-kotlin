@@ -617,7 +617,9 @@ object Pca {
                     if (!isObj(shares[i]) || !isStr((shares[i] as Map<String, Any?>)["role"])) return "threshold.shares[$i] is malformed"
                     val sh = shares[i] as Map<String, Any?>
                     if (decodeB64uStrict(sh["publicKey"], 32) == null) return "threshold.shares[$i].publicKey is not canonical base64url (32 bytes)"
-                    if (decodeB64uStrict(sh["sig"], 64) == null) return "threshold.shares[$i].sig is not canonical base64url (64 bytes)"
+                    // 0.4.1: the share signature is validated PER SUITE (alg absent == ed25519: 64-byte sig, no pq_sig).
+                    val shareErr = Pq.validateShareSignatureWire(sh)
+                    if (shareErr != null) return "threshold.shares[$i]: $shareErr"
                 }
             }
             null

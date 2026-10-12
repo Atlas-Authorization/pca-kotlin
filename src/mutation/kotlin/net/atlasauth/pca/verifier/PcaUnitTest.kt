@@ -455,7 +455,7 @@ class PcaUnitTest {
         val good = m("role" to "agent", "publicKey" to B32, "sig" to B64)
         assertNull(w { it["threshold"] = m("shares" to l(good)) })
         assertEquals("threshold.shares[1].publicKey is not canonical base64url (32 bytes)", w { it["threshold"] = m("shares" to l(good, m("role" to "x"))) })
-        assertEquals("threshold.shares[1].sig is not canonical base64url (64 bytes)", w { it["threshold"] = m("shares" to l(good, m("role" to "x", "publicKey" to B32))) })
+        assertEquals("threshold.shares[1]: 'sig' is not canonical base64url (64 bytes) for alg 'ed25519'", w { it["threshold"] = m("shares" to l(good, m("role" to "x", "publicKey" to B32))) })
         assertEquals("threshold.shares[0].publicKey is not canonical base64url (32 bytes)", w { it["threshold"] = m("shares" to l(m("role" to "x", "publicKey" to "bad", "sig" to B64), good)) })
         val weird = LinkedHashMap<Any, Any?>(); weird[5] = "x"
         assertTrue(Pca.validateWireV2(weird)!!.startsWith("malformed: java.lang.ClassCastException"))
