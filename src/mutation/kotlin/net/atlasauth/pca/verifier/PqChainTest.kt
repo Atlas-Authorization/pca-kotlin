@@ -73,6 +73,10 @@ class PqChainTest {
             val chain = l(root); val pins = m(issuer to pk(k))
             assertEquals("$alg pinned", "", Pca.verifyChain(chain, issuer, true, null, pins, null))
             assertEquals("", Pca.verifyChain(chain, issuer, true, null, null, root))
+            // 0.4.2: trusted root AND a pin for the issuer must agree (the stored grant never overrides a disagreeing pin)
+            assertEquals("", Pca.verifyChain(chain, issuer, true, null, pins, root))
+            assertEquals("hop 0: root suite '$alg': the server-side PQ pin for the root issuer (policy.pqPins) does not match the stored grant's pq_pk (fail closed)",
+                Pca.verifyChain(chain, issuer, true, null, m(issuer to pk(pqKey())), root))
             assertEquals("", Pca.verifyChain(chain, "", false, null, pins, null))
             assertEquals(refusal(alg), Pca.verifyChain(chain, issuer, true, null))
             assertEquals(refusal(alg), Pca.verifyChain(chain, issuer, true, null, m(issuer to pk(pqKey())), null))

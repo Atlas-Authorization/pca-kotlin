@@ -15,6 +15,7 @@ import java.math.BigInteger
  * The context is a map with snake_case keys, exactly the `context` of the `primitives.caveat_eval` vectors: `now` (epoch
  * ms), `delegation_depth`, `blast_radius`, `reversibility_class`, `recent_action_times` (all optional) and `action`
  * (`{verb, resource, reversibility_class, params}`). An absent optional field leaves the caveat that needs it unsatisfied.
+ * A well-formed `intent_session` caveat (Intent Layer v2) is satisfied (it constrains nothing per action), a malformed one is not.
  * Unknown caveat types (and `note`, `envelope`, `resource_prefix`, `predicates`, `tool_schema`) are unsatisfied: fail closed.
  */
 object Caveats {
@@ -107,6 +108,8 @@ object Caveats {
                 max != null && d != null && d <= max
             }
             "budget_alloc" -> fin(caveat["limit"])?.let { it >= 0 } ?: false
+            // Intent Layer v2 session binding (rule 13): no per-action constraint; satisfied iff well-formed.
+            "intent_session" -> IntentSession.caveatError(caveat) == null
             else -> false
         }
     }

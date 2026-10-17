@@ -138,14 +138,17 @@ class JsonPqThresholdUnitTest {
 
     @Test fun suites() {
         val ed = Pq.resolveSigAlg(null, false)!!
-        assertEquals(Pq.Suite("ed25519", 64, true, false, false, false), ed)
+        assertEquals(Pq.Suite("ed25519", 64, true, null, false, false), ed)
         assertEquals("ed25519", Pq.resolveSigAlg("ed25519", true)!!.alg)
-        assertEquals(Pq.Suite("ml-dsa-65", 3309, false, true, true, false), Pq.resolveSigAlg("ml-dsa-65", true))
+        assertEquals(Pq.Suite("ml-dsa-65", 3309, false, Pq.Prim.ML_DSA_65, true, false), Pq.resolveSigAlg("ml-dsa-65", true))
+        assertEquals(Pq.Suite("ml-dsa-87", 4627, false, Pq.Prim.ML_DSA_87, true, false), Pq.resolveSigAlg("ml-dsa-87", true))
         val hy = Pq.resolveSigAlg("hybrid-ed25519-ml-dsa-65", true)!!
-        assertEquals(Pq.Suite("hybrid-ed25519-ml-dsa-65", 64, true, true, true, true), hy)
-        assertTrue(hy.hasEd25519); assertTrue(hy.hasMlDsa); assertTrue(hy.needsPqPk); assertTrue(hy.needsPqSig)
-        assertFalse(ed.hasMlDsa); assertFalse(ed.needsPqSig)
-        assertNull(Pq.resolveSigAlg("ml-dsa-87", true)); assertNull(Pq.resolveSigAlg(5, true)); assertNull(Pq.resolveSigAlg(null, true))
+        assertEquals(Pq.Suite("hybrid-ed25519-ml-dsa-65", 64, true, Pq.Prim.ML_DSA_65, true, true), hy)
+        assertEquals(Pq.Suite("hybrid-nested-ed25519-ml-dsa-65", 64, true, Pq.Prim.ML_DSA_65, true, true, nested = true), Pq.resolveSigAlg("hybrid-nested-ed25519-ml-dsa-65", true))
+        assertTrue(hy.hasEd25519); assertEquals(Pq.Prim.ML_DSA_65, hy.pq); assertTrue(hy.needsPqPk); assertTrue(hy.needsPqSig); assertFalse(hy.nested)
+        assertNull(ed.pq); assertFalse(ed.needsPqSig)
+        // a registered suite outside the dispatch (no FIPS 206 in BouncyCastle) and malformed algs resolve to nothing
+        assertNull(Pq.resolveSigAlg("fn-dsa-512", true)); assertNull(Pq.resolveSigAlg(5, true)); assertNull(Pq.resolveSigAlg(null, true))
         assertEquals(1952, Pq.ML_DSA_65_PUBLIC_KEY_BYTES); assertEquals(3309, Pq.ML_DSA_65_SIGNATURE_BYTES); assertEquals(64, Pq.ED25519_SIGNATURE_BYTES); assertEquals("ed25519", Pq.DEFAULT_SIG_ALG)
     }
 

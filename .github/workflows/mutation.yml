@@ -1,0 +1,175 @@
+name: Mutation
+
+# Mutation testing of the verifier with PIT (pom.xml: ALL mutators, oracle = MutationHarness + the JUnit suites), split
+# into shards by target class (the last shard takes every class the others do not, so the shards partition the pom's
+# targetClasses exactly). PIT reports are converted with the flagship's tools/pca-audit/native-mutation/pit-convert.mjs and
+# the merge job checks the survivors (SURVIVED + NO_COVERAGE) against the equivalent-mutant ledger: it passes when every
+# survivor is a ledgered equivalent and no ledger entry is stale. Runs on demand and on ci/** branches (the
+# release-candidate check), never on main pushes.
+#
+# TARGETED mode (the default whenever a baseline exists): every shard uploads its PIT history (pit-history-<k>) and the next
+# run feeds it back (historyInputFile), so PIT re-runs ONLY what can have changed: mutants of a class whose bytecode changed
+# (any edited line), SURVIVED mutants whose covering tests changed (new kill tests), and NO_COVERAGE mutants (re-analysed
+# against fresh coverage). Untouched KILLED / TIMED_OUT / SURVIVED results are carried forward from the history, so each
+# shard still reports the COMPLETE mutant set and the merge checks the ledger over the full picture. Baseline = the input
+# `baseline_run`, else the newest earlier run of this workflow on the same branch that uploaded the shard's history; none
+# (or `full: true`) = a full run, which seeds the history for the next one.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run:
+        description: 'run id whose pit-history-<k> artifacts seed a targeted run (default: newest earlier run on this branch)'
+        required: false
+        default: ''
+      full:
+        description: 'ignore any baseline history: mutate everything'
+        type: boolean
+        default: false
+  push:
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+  actions: read   # download the baseline run's pit-history artifacts
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CRATE: kotlin-pca
+  SHARDS: '8'
+  P: net.atlasauth.pca.verifier
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}/8 (${{ matrix.classes }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, classes: 'Pca' }
+          - { shard: 2, classes: 'Pca$*' }
+          - { shard: 3, classes: 'Json*,Threshold*' }
+          - { shard: 4, classes: 'Pq*,Caveats*' }
+          - { shard: 5, classes: 'IntentV2*,IntentAcc*' }
+          - { shard: 6, classes: 'IntentMap*,IntentSession*,IntentRevocation*,IntentJs*,IntentClassifier*,IntentWB*,IntentArtifacts*' }
+          - { shard: 7, classes: 'SafeRegex*,Predicates*' }
+          - { shard: 8, classes: 'rest' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 23, not 21: LESS runs through the FFM API (JDK 22+). On 21 LessNative never loaded, so its mutants and every
+          # LESS branch of Pq were NO_COVERAGE or survived untested (ci.yml runs the same pom on 23 with --less)
+          java-version: '23'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout (+ libatlas_less -> ATLAS_PCA_LIBLESS, inherited by the PIT minions)
+        env:
+          LESS: '1'
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Baseline PIT history (targeted mode)
+        if: ${{ !inputs.full }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE: ${{ inputs.baseline_run }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pit-history-in"
+          ids="$BASELINE"
+          if [ -z "$ids" ]; then
+            ids="$(gh run list -R "$GITHUB_REPOSITORY" --workflow mutation.yml --branch "$GITHUB_REF_NAME" --limit 20 \
+                     --json databaseId -q '.[].databaseId' | grep -vx "$GITHUB_RUN_ID" || true)"
+          fi
+          for id in $ids; do
+            if gh run download "$id" -R "$GITHUB_REPOSITORY" -n "pit-history-$SHARD" -D "$RUNNER_TEMP/pit-history-in" 2>/dev/null \
+               && [ -s "$RUNNER_TEMP/pit-history-in/pit-history.txt" ]; then
+              echo "PIT_HISTORY_IN=$RUNNER_TEMP/pit-history-in/pit-history.txt" >> "$GITHUB_ENV"
+              echo "targeted: shard $SHARD seeded from run $id"; exit 0
+            fi
+          done
+          echo "::notice::shard $SHARD: no baseline PIT history found, full run (seeds the history for the next run)"
+      - name: Mutate
+        working-directory: ${{ env.MONO }}/sdks/kotlin-pca
+        env:
+          CLASSES: ${{ matrix.classes }}
+          JDK_JAVA_OPTIONS: --enable-native-access=ALL-UNNAMED
+        run: |
+          # the shard's class set replaces the pom's targetClasses (an explicit pom setting wins over -DtargetClasses)
+          python3 - <<'PY'
+          import os, re
+          p, c = os.environ["P"], os.environ["CLASSES"]
+          shards = ["Pca", "Pca$*", "Json*,Threshold*", "Pq*,Caveats*", "IntentV2*,IntentAcc*",
+                    "IntentMap*,IntentSession*,IntentRevocation*,IntentJs*,IntentClassifier*,IntentWB*,IntentArtifacts*",
+                    "SafeRegex*,Predicates*"]
+          par = lambda xs: "".join(f"<param>{p}.{x}</param>" for x in xs)
+          if c == "rest":
+              block = f"<targetClasses><param>{p}.*</param></targetClasses><excludedClasses>{par(','.join(shards).split(','))}</excludedClasses>"
+          else:
+              block = f"<targetClasses>{par(c.split(','))}</targetClasses>"
+          s = open("pom.xml").read()
+          s2 = re.sub(r"<targetClasses>.*?</targetClasses>", lambda m: block, s, count=1, flags=re.S)
+          assert s2 != s, "targetClasses not found in pom.xml"
+          open("pom.xml", "w").write(s2)
+          print(block)
+          PY
+          mvn -B -ntp -q test-compile
+          hist=(-DhistoryOutputFile="$RUNNER_TEMP/pit-history-out/pit-history.txt")
+          mkdir -p "$RUNNER_TEMP/pit-history-out"
+          [ -n "${PIT_HISTORY_IN:-}" ] && hist+=(-DhistoryInputFile="$PIT_HISTORY_IN")
+          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=4 -DtimestampedReports=false "${hist[@]}" | tail -40
+      - name: Report
+        run: |
+          X="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+          [ -n "$X" ] || { echo "::error::no mutations.xml"; exit 1; }
+          node "$MONO/tools/pca-audit/native-mutation/pit-convert.mjs" "$CRATE" "$X" results.json survivors-raw.json
+          node -e '
+            const fs = require("fs"); const r = JSON.parse(fs.readFileSync("results.json", "utf8"));
+            const counts = {}; for (const m of r) counts[m.st] = (counts[m.st] || 0) + 1;
+            const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map(({ status, ...x }) => x);
+            fs.writeFileSync("counts.json", JSON.stringify(counts)); fs.writeFileSync("survivors.json", JSON.stringify(s));
+          '
+          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$SHARDS" --tool=pitest \
+            --counts=counts.json --survivors=survivors.json --out=shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pit-history-${{ matrix.shard }}
+          path: ${{ runner.temp }}/pit-history-out/pit-history.txt
+          retention-days: 30
+          if-no-files-found: warn
+
+  merge:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship checker + ledger
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+      - name: Merge shards and check the ledger
+        run: >
+          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports
+          --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: survivors-merged
+          path: reports/survivors-merged.json
+          if-no-files-found: ignore

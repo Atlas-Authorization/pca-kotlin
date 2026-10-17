@@ -10,8 +10,8 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519
  * Native Kotlin reference verifier for the CORE PCActn checks, wire format v2. Byte-matches `@atlasauth/pca`
  * (the TypeScript source of truth) and the sibling language verifiers (java-pca, go-pca, python-pca, ...).
  *
- * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter`
- * (a wire failure is terminal). Requires BouncyCastle (`org.bouncycastle.math.ec.rfc8032.Ed25519`), which the
+ * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter`, then
+ * `intent` when evaluated (Intent Layer M2, see [IntentPolicy]) (a wire failure is terminal). Requires BouncyCastle (`org.bouncycastle.math.ec.rfc8032.Ed25519`), which the
  * module already depends on for the step-up client.
  *
  * This is a faithful Kotlin port of `sdks/java-pca/.../Pca.java` + the audience fail-closed semantics in
@@ -69,7 +69,157 @@ object Pca {
         object Unset : Audience()
     }
 
-    /** `checks` holds, in normative order, wire alone (wire failure) or all eight checks. */
+    // ---- Intent Layer M2: envelope.intent ----
+    const val INTENT_GOAL_PREFIX = "pca-intent:v1:"
+    /** Domain of the root grant's salted goal commitment (envelope goal_commit). */
+    const val INTENT_GOAL_COMMIT_DOMAIN = "atlas-pca/goal/v1\u0000"
+    const val PPM_ONE = 1_000_000L
+    const val MAX_INTENT_GOAL_SALT_LEN = 128
+    /** Closed member set of `envelope.intent` (all required). */
+    internal val ENVELOPE_INTENT_FIELDS = listOf("ref", "map_digest", "goal_salt", "fidelity_ppm", "residual_risk_ppm")
+    private const val MAX_SAFE_DOUBLE = 9007199254740991.0
+
+    /**
+     * Verifier-side intent policy (Intent Layer M2). ACTIVE iff [require] is true or either threshold is set (a threshold
+     * implies require); an active policy fails closed on a PCActn without `intent`. Thresholds are nullable doubles so a
+     * set-but-invalid value (negative, fractional, NaN) is representable: it is a misconfiguration and fails closed.
+     */
+    data class IntentPolicy(
+        /** Require every PCActn to carry a bound `intent`. */
+        val require: Boolean = false,
+        /** Deny when the claimed `fidelity_ppm` is below this (null = unset). Setting it implies require. */
+        val minFidelityPpm: Double? = null,
+        /** Deny when the claimed `residual_risk_ppm` is above this (null = unset). Setting it implies require. */
+        val maxResidualRiskPpm: Double? = null,
+    ) {
+        /** True iff the policy is active (the intent check runs even for a PCActn without the field). */
+        val isActive: Boolean get() = require || minFidelityPpm != null || maxResidualRiskPpm != null
+
+        companion object {
+            /**
+             * From a parsed JSON object `{require?, min_fidelity_ppm?, max_residual_risk_ppm?}` ([Json] tree or plain
+             * values). A non-object is null (no policy). A present threshold that is not a number (including JSON null)
+             * maps to NaN: set, and invalid, so it fails closed.
+             */
+            fun fromJson(o: Any?): IntentPolicy? {
+                if (o !is Map<*, *>) return null
+                return IntentPolicy(o["require"] == true, threshold(o, "min_fidelity_ppm"), threshold(o, "max_residual_risk_ppm"))
+            }
+
+            /**
+             * From raw JSON text (a policy configuration file, or a conformance vector's `intent_policy_json`), parsed
+             * with the lenient RFC 8259 parser so any number spelling is kept (`950000.0` and `1e6` are the valid
+             * thresholds 950000 and 1000000: validity is judged on the NUMERIC value). Non-object JSON is null; malformed
+             * JSON throws (a configuration error).
+             */
+            fun fromJsonText(text: String): IntentPolicy? = fromJson(Json.parseLenient(text))
+
+            private fun threshold(m: Map<*, *>, k: String): Double? {
+                if (!m.containsKey(k)) return null
+                return when (val v = m[k]) {
+                    is Json.Num -> v.raw.toDoubleOrNull() ?: Double.NaN
+                    is Number -> v.toDouble()
+                    else -> Double.NaN
+                }
+            }
+        }
+    }
+
+    /** A set policy threshold must be a safe integer >= 0 (finite, integral, not -0, <= 2^53-1). */
+    internal fun okThreshold(x: Double?): Boolean {
+        if (x == null) return true
+        if (x.isNaN() || x.isInfinite() || x != Math.rint(x)) return false
+        if (x == 0.0 && java.lang.Double.doubleToRawLongBits(x) != 0L) return false // -0
+        return x >= 0 && x <= MAX_SAFE_DOUBLE
+    }
+
+    /** The goal string that binds a grant to an intent statement and Intent Map. */
+    fun intentGoal(ref: String, mapDigest: String? = null): String =
+        INTENT_GOAL_PREFIX + ref + (if (!mapDigest.isNullOrEmpty()) ":$mapDigest" else "")
+
+    /** The goal commitment an `envelope.intent` claims the root grant carries. */
+    fun intentGoalCommit(ref: String, mapDigest: String, goalSalt: String): String =
+        hashCanonical(linkedMapOf<String, Any?>("d" to INTENT_GOAL_COMMIT_DOMAIN, "goal" to intentGoal(ref, mapDigest), "salt" to goalSalt))
+
+    /**
+     * Intent Layer v2 (rule 13 amends rule 12 step 2): the goal commitment when the PCActn carries a wire-valid
+     * `intent_session`: the goal is `"pca-intent:v2:" + session + ":" + map_digest`.
+     */
+    fun intentGoalCommitV2(session: String, mapDigest: String, goalSalt: String): String =
+        hashCanonical(linkedMapOf<String, Any?>("d" to INTENT_GOAL_COMMIT_DOMAIN, "goal" to IntentSession.intentGoalV2(session, mapDigest), "salt" to goalSalt))
+
+    /**
+     * Intent Layer v2 committed map (rule 19 amends rule 12 step 2): the goal commitment when the PCActn's
+     * `intent_session.map_form` is `"commit"`: the goal is `"pca-intent:v2c:" + session + ":" + map_commit`.
+     */
+    fun intentGoalCommitV2c(session: String, mapCommit: String, goalSalt: String): String =
+        hashCanonical(linkedMapOf<String, Any?>("d" to INTENT_GOAL_COMMIT_DOMAIN, "goal" to IntentSession.intentGoalV2c(session, mapCommit), "salt" to goalSalt))
+
+    /** Wire validation of the `intent` slot (called when the slot is present, even as null). Null = well-formed. */
+    @Suppress("UNCHECKED_CAST")
+    internal fun validateIntentWire(o: Any?): String? {
+        if (o !is Map<*, *>) return "'intent' must be an object"
+        val v = o as Map<String, Any?>
+        for (k in v.keys) if (!ENVELOPE_INTENT_FIELDS.contains(k)) return "unknown field 'intent.$k'"
+        for (k in ENVELOPE_INTENT_FIELDS) if (!v.containsKey(k)) return "missing field 'intent.$k'"
+        if (decodeB64uStrict(v["ref"], 32) == null) return "'intent.ref' is not canonical base64url (32 bytes)"
+        if (decodeB64uStrict(v["map_digest"], 32) == null) return "'intent.map_digest' is not canonical base64url (32 bytes)"
+        val salt = v["goal_salt"]
+        if (salt !is String || salt.isEmpty() || utf8Len(salt) > MAX_INTENT_GOAL_SALT_LEN)
+            return "'intent.goal_salt' must be a non-empty string (<= 128 UTF-8 bytes)"
+        val f = v["fidelity_ppm"]
+        if (!Json.isSafeInt(f) || Json.asLong(f) < 0 || Json.asLong(f) > PPM_ONE) return "'intent.fidelity_ppm' must be a safe integer in [0, 1000000]"
+        val r = v["residual_risk_ppm"]
+        if (!Json.isSafeInt(r) || Json.asLong(r) < 0) return "'intent.residual_risk_ppm' must be a non-negative safe integer"
+        return null
+    }
+
+    /** The root grant's goal commitment: the FIRST `envelope` caveat's string `goal_commit`, else null. */
+    internal fun rootGoalCommit(grant: Map<String, Any?>?): String? {
+        val cav = grant?.get("caveats") as? List<*> ?: return null
+        val env = cav.firstOrNull { it is Map<*, *> && it["type"] == "envelope" } as? Map<*, *> ?: return null
+        return env["goal_commit"] as? String
+    }
+
+    /**
+     * The `intent` check (Intent Layer M2). [intent] is the PCActn's slot after wire validation and [present] whether the
+     * PCActn carries it; [grant] the verifier's own root grant. Returns null when the check is not evaluated (no intent,
+     * no active policy), "" on pass, else the failure reason. Never throws. [session] is the PCActn's wire-valid
+     * `intent_session.session` (null when it carries none), which selects the v2 goal
+     * `"pca-intent:v2:" + session + ":" + map_digest` (rule 13 amends rule 12 step 2), or with [mapForm] `"commit"` the v2c
+     * goal `"pca-intent:v2c:" + session + ":" + map_digest` (rule 19).
+     */
+    internal fun decideIntent(
+        intent: Any?, present: Boolean, grant: Map<String, Any?>?, policy: IntentPolicy?, session: String? = null, mapForm: Any? = null,
+    ): String? {
+        val active = policy != null && policy.isActive
+        if (!present && !active) return null
+        return try {
+            if (active && (!okThreshold(policy!!.minFidelityPpm) || !okThreshold(policy.maxResidualRiskPpm)))
+                return "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)"
+            if (!present) return "this verifier requires an intent binding but the PCActn carries none"
+            val commit = rootGoalCommit(grant) ?: return "the root grant carries no envelope goal commitment to bind the intent to"
+            val i = intent as Map<*, *>
+            val opened = if (session != null) {
+                if (mapForm == IntentMap.MAP_FORM_COMMIT) intentGoalCommitV2c(session, i["map_digest"] as String, i["goal_salt"] as String)
+                else intentGoalCommitV2(session, i["map_digest"] as String, i["goal_salt"] as String)
+            }
+            else intentGoalCommit(i["ref"] as String, i["map_digest"] as String, i["goal_salt"] as String)
+            if (opened != commit)
+                return "intent ref / map_digest / goal_salt do not open the root grant's goal commitment"
+            val fid = Json.asLong(i["fidelity_ppm"])
+            val risk = Json.asLong(i["residual_risk_ppm"])
+            val min = policy?.minFidelityPpm
+            if (min != null && !(fid.toDouble() >= min)) return "intent fidelity $fid ppm is below the policy minimum ${min.toLong()}"
+            val max = policy?.maxResidualRiskPpm
+            if (max != null && !(risk.toDouble() <= max)) return "intent residual risk $risk ppm exceeds the policy maximum ${max.toLong()}"
+            ""
+        } catch (e: RuntimeException) {
+            "intent binding error (fail closed): ${e.javaClass.simpleName}"
+        }
+    }
+
+    /** `checks` holds, in normative order, wire alone (wire failure) or all eight checks (plus intent when evaluated). */
     class Verdict {
         var allow = false
         val checks = LinkedHashMap<String, Boolean>()
@@ -334,7 +484,7 @@ object Pca {
 
     /** Returns "" when OK, else an error label. Suite-agile: an unknown hop alg fails closed before any hashing. */
     private fun checkSig(c: Map<String, Any?>, signer: String, label: String, pq: PinnedPq?): String {
-        val body = signableHopBody(c) ?: return "$label: unknown signature alg '${c["alg"]}'"
+        val body = signableHopBody(c) ?: return "$label: ${Pq.refusal(c["alg"])}"
         val digest = try {
             hashCanonical(body)
         } catch (e: RuntimeException) {
@@ -358,6 +508,9 @@ object Pca {
         "hop 0: root suite '$alg' needs a PQ key pinned for the root issuer (policy.pqPins) or the verifier's stored grant " +
             "(policy.trustedRoot); the root's own pq_pk proves nothing about who issued it (R3-01)"
 
+    private fun rootPqPinMismatchReason(alg: String): String =
+        "hop 0: root suite '$alg': the server-side PQ pin for the root issuer (policy.pqPins) does not match the stored grant's pq_pk (fail closed)"
+
     /**
      * The root hop has no parent holding a holder_pq commitment, so a non-ed25519 root's PQ key must come from a verifier-side
      * authority: the verifier's stored copy of this very grant ([trustedRoot], same content hash) or a pin for root.issuer.
@@ -371,6 +524,10 @@ object Pca {
             try { if (capHash(trustedRoot) == capHash(root)) pk else null } catch (ex: RuntimeException) { null }
         } else null
         val issuer = root["issuer"] as? String
+        // 0.4.2 fail closed: with the stored grant AND a pin for the issuer, both must agree (the grant never overrides a pin).
+        if (trusted != null && pqPins != null && issuer != null && pqPins.containsKey(issuer) && pqPins[issuer] != trusted) {
+            return Pair(null, rootPqPinMismatchReason(suite.alg))
+        }
         val key = PinnedPq.resolve(issuer, pk, pqPins = pqPins, trustedPk = trusted)
         return if (key == null) Pair(null, rootPqPinReason(suite.alg)) else Pair(key, null)
     }
@@ -467,6 +624,10 @@ object Pca {
     private val OPTIONAL = listOf(
         "nonce", "caution", "rationale_commitment", "progress_step", "prohibition_evidence", "tool_binding",
         "threshold", "zk_compliance", "bond_ref",
+        // Intent Layer M2 (additive, SIGNED): the `envelope.intent` binding (see validateIntentWire / decideIntent).
+        "intent",
+        // Intent Layer v2 (additive, SIGNED): the session member (rule 13; see IntentSession.validateWire / IntentV2).
+        "intent_session",
         // B4 crypto-agility (additive): absent `alg` == "ed25519" and validates exactly as today.
         "alg", "pq_pk", "pq_sig",
     )
@@ -607,6 +768,8 @@ object Pca {
             if (p.containsKey("tool_binding") && decodeB64uStrict(p["tool_binding"], 32) == null)
                 return "'tool_binding' is not canonical base64url (32 bytes)"
             if (p.containsKey("progress_step") && !isObj(p["progress_step"])) return "'progress_step' must be an object"
+            if (p.containsKey("intent")) validateIntentWire(p["intent"])?.let { return it }
+            if (p.containsKey("intent_session")) IntentSession.validateWire(p["intent_session"])?.let { return it }
             if (p.containsKey("prohibition_evidence") && !isObj(p["prohibition_evidence"]) && p["prohibition_evidence"] !is List<*>)
                 return "'prohibition_evidence' must be an object or array"
             if (p.containsKey("threshold")) {
@@ -638,7 +801,10 @@ object Pca {
     }
 
     /** Verify raw PCActn JSON text: strict-profile parse first (any failure, or a non-object, is a wire failure). */
-    fun verifyPcactnJson(text: String, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null): Verdict {
+    fun verifyPcactnJson(
+        text: String, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+    ): Verdict {
         if (artifactTooLarge(text)) { // FIRST: before any parsing
             val big = Verdict()
             big.fail("wire", ARTIFACT_SIZE_REASON)
@@ -652,22 +818,32 @@ object Pca {
             v.fail("wire", "strict JSON: ${e.message}")
             return v
         }
-        return verifyPcactn(parsed, grant, now, audience, allowedSuites)
+        return verifyPcactn(parsed, grant, now, audience, allowedSuites, intentPolicy, intentV2)
     }
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
-     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter. allow = every check true.
+     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter, then `intent` iff the PCActn carries
+     * `intent` or [intentPolicy] is active (Intent Layer M2; absent both, the verdict is the pre-M2 one), then the Intent
+     * Layer v2 checks `schema`, `intent_session`, `layers`, `accumulators`, `facts`, `provenance`, `classes` exactly when
+     * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before).
+     * allow = every check true.
      */
-    fun verifyPcactn(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null): Verdict =
+    fun verifyPcactn(
+        pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+    ): Verdict =
         // TOTAL (R6-05): any residual fault on hostile input is a terminal wire refusal, never an exception.
         try {
-            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites)
+            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites, intentPolicy, intentV2)
         } catch (ex: RuntimeException) {
             Verdict().also { it.fail("wire", "malformed input (${ex.javaClass.simpleName})") }
         }
 
-    private fun verifyPcactnUnchecked(pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>?): Verdict {
+    private fun verifyPcactnUnchecked(
+        pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>?,
+        intentPolicy: IntentPolicy?, intentV2: IntentV2.Context?,
+    ): Verdict {
         val v = Verdict()
         val wire = validateWireV2(pcactn)
         if (wire != null) {
@@ -676,6 +852,8 @@ object Pca {
         }
         val p = asMap(pcactn)
         v.checks["wire"] = true
+        val intentPresent = p.containsKey("intent")
+        val intentReported = intentPresent || (intentPolicy != null && intentPolicy.isActive)
         try {
             // version
             if (Json.asLong(p["ver"]) == WIRE_VERSION) v.checks["version"] = true
@@ -749,6 +927,14 @@ object Pca {
             // counter
             if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter"] = true
             else v.fail("counter", "missing or not a non-negative safe integer")
+
+            // Intent Layer M2: `intent` (reported iff the PCActn carries intent or the policy is active)
+            val session = if (p.containsKey("intent_session")) asMap(p["intent_session"])["session"] else null
+            val mapForm = if (p.containsKey("intent_session")) asMap(p["intent_session"])["map_form"] else null
+            val intentWhy = decideIntent(p["intent"], intentPresent, grant, intentPolicy, session as? String, mapForm)
+            if (intentWhy != null) {
+                if (intentWhy.isEmpty()) v.checks["intent"] = true else v.fail("intent", intentWhy)
+            }
         } catch (e: RuntimeException) {
             if (v.reason.isEmpty()) v.reason = "malformed PCActn: $e"
         }
@@ -756,6 +942,12 @@ object Pca {
         val ordered = LinkedHashMap<String, Boolean>()
         for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"))
             ordered[k] = v.checks[k] == true
+        if (intentReported) ordered["intent"] = v.checks["intent"] == true
+        // Intent Layer v2 (rules 13-18): reported in pipeline order exactly when IntentV2 reports them (total: never throws)
+        for (c in IntentV2.decide(p, grant, intentV2, now).checks) {
+            ordered[c.name] = c.ok
+            if (!c.ok && v.reason.isEmpty()) v.reason = "${c.name}: ${c.reason}"
+        }
         v.checks.clear()
         v.checks.putAll(ordered)
         v.allow = !v.checks.containsValue(false)

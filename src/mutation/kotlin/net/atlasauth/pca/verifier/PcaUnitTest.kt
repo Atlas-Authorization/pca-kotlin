@@ -555,4 +555,342 @@ class PcaUnitTest {
         assertEquals(3_600_000L, Pca.MAX_LIFETIME_MS); assertEquals(60_000L, Pca.MAX_SKEW_MS); assertEquals(256, Pca.MAX_AUD_LEN); assertEquals(128, Pca.MAX_NONCE_LEN)
         assertEquals(256, Pca.MAX_CAVEATS_PER_HOP); assertEquals(1024, Pca.MAX_CAVEATS_PER_CHAIN); assertEquals(524288, Pca.MAX_ARTIFACT_BYTES)
     }
+
+    // ------------------------------------------------------------------ Intent Layer M2: envelope.intent
+    private val intentCommit = "ydb-xdDmGIg5nClx85Jyt4NstgcNXKLofdPhe5NrNA4" // cross-language pin (goal = pca-intent:v1:B32:B32, salt "salt")
+    private fun intentSlot() = m("ref" to B32, "map_digest" to B32, "goal_salt" to "salt", "fidelity_ppm" to n("950000"), "residual_risk_ppm" to n("4310000"))
+    private fun intentGrant(goalCommit: Any?) = m("caveats" to l(m("type" to "max_spend", "usd" to n("100")), m("type" to "envelope", "goal_commit" to goalCommit)))
+
+    @Test fun intentWire() {
+        assertNull(Pca.validateIntentWire(intentSlot()))
+        assertEquals("'intent' must be an object", Pca.validateIntentWire(null))
+        assertEquals("'intent' must be an object", Pca.validateIntentWire("x"))
+        assertEquals("'intent' must be an object", Pca.validateIntentWire(l(intentSlot())))
+        assertEquals("unknown field 'intent.note'", Pca.validateIntentWire(intentSlot().also { it["note"] = "x" }))
+        assertEquals("missing field 'intent.ref'", Pca.validateIntentWire(intentSlot().also { it.remove("ref") }))
+        assertEquals("'intent.ref' is not canonical base64url (32 bytes)", Pca.validateIntentWire(intentSlot().also { it["ref"] = "$B32=" }))
+        assertEquals("'intent.map_digest' is not canonical base64url (32 bytes)", Pca.validateIntentWire(intentSlot().also { it["map_digest"] = "+" + B32.substring(1) }))
+        val saltErr = "'intent.goal_salt' must be a non-empty string (<= 128 UTF-8 bytes)"
+        assertEquals(saltErr, Pca.validateIntentWire(intentSlot().also { it["goal_salt"] = "" }))
+        assertEquals(saltErr, Pca.validateIntentWire(intentSlot().also { it["goal_salt"] = n("5") }))
+        assertNull(Pca.validateIntentWire(intentSlot().also { it["goal_salt"] = "\u00e9".repeat(64) }))
+        assertEquals(saltErr, Pca.validateIntentWire(intentSlot().also { it["goal_salt"] = "\u00e9".repeat(64) + "a" }))
+        assertNull(Pca.validateIntentWire(intentSlot().also { it["fidelity_ppm"] = n("1000000"); it["residual_risk_ppm"] = n("9007199254740991") }))
+        for (bad in listOf(n("1000001"), n("-1"), n("1.5"), "950000", true))
+            assertEquals("'intent.fidelity_ppm' must be a safe integer in [0, 1000000]", Pca.validateIntentWire(intentSlot().also { it["fidelity_ppm"] = bad }))
+        for (bad in listOf(n("-1"), n("0.25"), true))
+            assertEquals("'intent.residual_risk_ppm' must be a non-negative safe integer", Pca.validateIntentWire(intentSlot().also { it["residual_risk_ppm"] = bad }))
+    }
+
+    @Test fun intentPolicyAndBinding() {
+        assertEquals(intentCommit, Pca.intentGoalCommit(B32, B32, "salt"))
+        assertEquals("pca-intent:v1:$B32:$B32", Pca.intentGoal(B32, B32))
+        assertFalse(Pca.IntentPolicy().isActive)
+        assertTrue(Pca.IntentPolicy(require = true).isActive)
+        assertTrue(Pca.IntentPolicy(maxResidualRiskPpm = 1.0).isActive)
+        assertNull(Pca.IntentPolicy.fromJson("x"))
+        assertFalse(Pca.IntentPolicy.fromJson(m("require" to false))!!.isActive)
+        assertTrue(Pca.IntentPolicy.fromJson(m("min_fidelity_ppm" to null))!!.isActive)
+        assertTrue(Pca.IntentPolicy.fromJson(m("min_fidelity_ppm" to "1"))!!.minFidelityPpm!!.isNaN())
+
+        val g = intentGrant(intentCommit)
+        assertNull(Pca.decideIntent(null, false, g, null))
+        assertNull(Pca.decideIntent(null, false, g, Pca.IntentPolicy()))
+        val none = "this verifier requires an intent binding but the PCActn carries none"
+        assertEquals(none, Pca.decideIntent(null, false, g, Pca.IntentPolicy(require = true)))
+        assertEquals(none, Pca.decideIntent(null, false, g, Pca.IntentPolicy(minFidelityPpm = 1.0)))
+        assertEquals("", Pca.decideIntent(intentSlot(), true, g, null))
+        assertEquals("", Pca.decideIntent(intentSlot(), true, g, Pca.IntentPolicy(true, 950000.0, 4310000.0)))
+        val mis = "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)"
+        for (bad in listOf(-1.0, 0.5, -0.0, Double.NaN, 9007199254740992.0))
+            assertEquals(mis, Pca.decideIntent(intentSlot(), true, g, Pca.IntentPolicy(minFidelityPpm = bad)))
+        assertEquals(mis, Pca.decideIntent(intentSlot(), true, g, Pca.IntentPolicy(maxResidualRiskPpm = 0.5)))
+        assertEquals("intent fidelity 950000 ppm is below the policy minimum 950001", Pca.decideIntent(intentSlot(), true, g, Pca.IntentPolicy(minFidelityPpm = 950001.0)))
+        assertEquals("intent residual risk 4310000 ppm exceeds the policy maximum 4309999", Pca.decideIntent(intentSlot(), true, g, Pca.IntentPolicy(maxResidualRiskPpm = 4309999.0)))
+        val open = "intent ref / map_digest / goal_salt do not open the root grant's goal commitment"
+        assertEquals(open, Pca.decideIntent(intentSlot().also { it["goal_salt"] = "wrong-salt" }, true, g, null))
+        val noEnv = "the root grant carries no envelope goal commitment to bind the intent to"
+        assertEquals(noEnv, Pca.decideIntent(intentSlot(), true, intentGrant(n("7")), null))
+        assertEquals(noEnv, Pca.decideIntent(intentSlot(), true, m("caveats" to l()), null))
+        assertEquals(noEnv, Pca.decideIntent(intentSlot(), true, m(), null))
+        val two = m("caveats" to l(m("type" to "envelope", "goal_commit" to B32), m("type" to "envelope", "goal_commit" to intentCommit)))
+        assertEquals(open, Pca.decideIntent(intentSlot(), true, two, null))
+    }
+
+    @Test fun intentVerify() {
+        val base = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+        val raw = vec("valid-raw-json-format-insensitive")["pcactn_json"] as String
+        val of = Pca.Audience.Of(AUD)
+        var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of)
+        assertTrue(g.allow); assertEquals(base, g.checks.keys.toList())
+        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = false))
+        assertTrue(g.allow); assertEquals(base, g.checks.keys.toList())
+        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true))
+        assertFalse(g.allow)
+        assertEquals(base + "intent", g.checks.keys.toList())
+        assertEquals(false, g.checks["intent"])
+        assertEquals("intent: this verifier requires an intent binding but the PCActn carries none", g.reason)
+        val p = valid()
+        p["intent"] = intentSlot()
+        g = Pca.verifyPcactn(p, validGrant(), NOW, of)
+        assertEquals(base + "intent", g.checks.keys.toList())
+        assertEquals(true, g.checks["wire"]); assertEquals(false, g.checks["leaf_signature"]); assertEquals(false, g.checks["intent"])
+        val bound = LinkedHashMap(validGrant()).also { it["caveats"] = intentGrant(intentCommit)["caveats"] }
+        assertEquals(true, Pca.verifyPcactn(p, bound, NOW, of).checks["intent"])
+        p["intent"] = null
+        g = Pca.verifyPcactn(p, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true))
+        assertEquals(listOf("wire"), g.checks.keys.toList())
+        assertEquals("wire: 'intent' must be an object", g.reason)
+    }
+
+    // ------------------------------------------------------------------ Intent Layer M2: mutation-kill boundaries
+    private val eFid = "'intent.fidelity_ppm' must be a safe integer in [0, 1000000]"
+    private val eRisk = "'intent.residual_risk_ppm' must be a non-negative safe integer"
+    private val eSalt = "'intent.goal_salt' must be a non-empty string (<= 128 UTF-8 bytes)"
+    private val eRef = "'intent.ref' is not canonical base64url (32 bytes)"
+    private val eMap = "'intent.map_digest' is not canonical base64url (32 bytes)"
+    private val iMis = "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)"
+    private val iNone = "this verifier requires an intent binding but the PCActn carries none"
+    private val iNoEnv = "the root grant carries no envelope goal commitment to bind the intent to"
+    private val iOpen = "intent ref / map_digest / goal_salt do not open the root grant's goal commitment"
+    private val baseKeys = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+    private val intentKeys = baseKeys + "intent"
+
+    private fun slotWith(k: String, v: Any?) = intentSlot().also { it[k] = v }
+    private fun envelope(goalCommit: Any?) = m("type" to "envelope", "goal_commit" to goalCommit)
+    private fun grantOf(vararg caveats: Any?) = m("caveats" to l(*caveats))
+    private fun decide(intent: Map<String, Any?>?, grant: Map<String, Any?>?, pol: Pca.IntentPolicy?) = Pca.decideIntent(intent, intent != null, grant, pol)
+    private fun pol(require: Boolean = false, min: Double? = null, max: Double? = null) = Pca.IntentPolicy(require, min, max)
+
+    /** A real root grant (principal -> agent) whose caveats are [max_spend, envelope(goal_commit)]. */
+    private fun intentRoot(): Map<String, Any?> =
+        PqChainTest.signedEd(PqChainTest.pub("principal"), PqChainTest.pub("agent"), l(m("type" to "max_spend", "usd" to n("100")), envelope(intentCommit)), null, "principal", "")
+    /** The valid PCActn re-rooted on `root`, carrying `intent` (when non-null), re-signed by the agent leaf key. */
+    private fun signedWithIntent(root: Map<String, Any?>, intent: Map<String, Any?>?): MutableMap<String, Any?> {
+        val p = valid()
+        p["cap_chain"] = l(root)
+        p["grant_ref"] = root["id"]
+        if (intent != null) p["intent"] = intent
+        p["sig"] = PqChainTest.edSign("agent", Pca.thresholdMessage(p))
+        return p
+    }
+
+    @Test fun intentKillWireBoundaries() {
+        for (ok in listOf<Any?>(n("0"), n("1"), n("999999"), n("1000000"), 0, 1000000L)) assertNull("$ok", Pca.validateIntentWire(slotWith("fidelity_ppm", ok)))
+        for (bad in listOf<Any?>(n("-1"), n("1000001"), n("9007199254740991"), n("1.5"), n("0.5"), "1", true, false, null, 1000001L, -1))
+            assertEquals("$bad", eFid, Pca.validateIntentWire(slotWith("fidelity_ppm", bad)))
+        for (ok in listOf<Any?>(n("0"), n("1000001"), n("9007199254740991"))) assertNull("$ok", Pca.validateIntentWire(slotWith("residual_risk_ppm", ok)))
+        for (bad in listOf<Any?>(n("-1"), n("9007199254740992"), n("0.25"), "0", true, null, -1L))
+            assertEquals("$bad", eRisk, Pca.validateIntentWire(slotWith("residual_risk_ppm", bad)))
+        for (ok in listOf("a", "a".repeat(128), "é".repeat(64))) assertNull(ok, Pca.validateIntentWire(slotWith("goal_salt", ok)))
+        for (bad in listOf<Any?>("a".repeat(129), "é".repeat(64) + "a", "é".repeat(65), "", n("5"), null, true, l(), m()))
+            assertEquals("$bad", eSalt, Pca.validateIntentWire(slotWith("goal_salt", bad)))
+        val b31 = Pca.b64(ByteArray(31)); val b33 = Pca.b64(ByteArray(33))
+        for (bad in listOf<Any?>(b31, b33, "$B32=", "+" + B32.substring(1), "/" + B32.substring(1), "", n("1"), null, true))
+            assertEquals("$bad", eRef, Pca.validateIntentWire(slotWith("ref", bad)))
+        for (bad in listOf<Any?>(b31, b33, "$B32=", "+" + B32.substring(1), "", n("1"), null))
+            assertEquals("$bad", eMap, Pca.validateIntentWire(slotWith("map_digest", bad)))
+        // member order: ref, map_digest, goal_salt, fidelity_ppm, residual_risk_ppm
+        val all = intentSlot().also { it["ref"] = ""; it["map_digest"] = ""; it["goal_salt"] = ""; it["fidelity_ppm"] = n("-1"); it["residual_risk_ppm"] = n("-1") }
+        assertEquals(eRef, Pca.validateIntentWire(all))
+        all["ref"] = B32; assertEquals(eMap, Pca.validateIntentWire(all))
+        all["map_digest"] = B32; assertEquals(eSalt, Pca.validateIntentWire(all))
+        all["goal_salt"] = "s"; assertEquals(eFid, Pca.validateIntentWire(all))
+        all["fidelity_ppm"] = n("0"); assertEquals(eRisk, Pca.validateIntentWire(all))
+        all["residual_risk_ppm"] = n("0"); assertNull(Pca.validateIntentWire(all))
+    }
+
+    @Test fun intentKillWireShape() {
+        for (k in listOf("ref", "map_digest", "goal_salt", "fidelity_ppm", "residual_risk_ppm"))
+            assertEquals("missing field 'intent.$k'", Pca.validateIntentWire(intentSlot().also { it.remove(k) }))
+        assertEquals("unknown field 'intent.note'", Pca.validateIntentWire(slotWith("note", "x")))
+        assertEquals("unknown field 'intent.zz'", Pca.validateIntentWire(intentSlot().also { it.remove("ref"); it["zz"] = 1 }))
+        for (bad in listOf<Any?>(null, "x", n("1"), true, l(intentSlot()), l()))
+            assertEquals("$bad", "'intent' must be an object", Pca.validateIntentWire(bad))
+        assertEquals("missing field 'intent.ref'", Pca.validateIntentWire(m()))
+    }
+
+    @Test fun intentKillPolicy() {
+        assertFalse(pol().isActive)
+        assertTrue(pol(require = true).isActive)
+        assertTrue(pol(min = 0.0).isActive)
+        assertTrue(pol(max = 0.0).isActive)
+        assertNull(Pca.IntentPolicy.fromJson(null))
+        assertNull(Pca.IntentPolicy.fromJson(l()))
+        assertFalse(Pca.IntentPolicy.fromJson(m())!!.isActive)
+        assertFalse(Pca.IntentPolicy.fromJson(m("require" to false))!!.isActive)
+        assertFalse(Pca.IntentPolicy.fromJson(m("require" to "true"))!!.isActive)
+        assertFalse(Pca.IntentPolicy.fromJson(m("require" to n("1")))!!.isActive)
+        assertTrue(Pca.IntentPolicy.fromJson(m("require" to true))!!.isActive)
+        val fj = Pca.IntentPolicy.fromJson(m("min_fidelity_ppm" to n("950000"), "max_residual_risk_ppm" to 7))!!
+        assertEquals(950000.0, fj.minFidelityPpm!!, 0.0)
+        assertEquals(7.0, fj.maxResidualRiskPpm!!, 0.0)
+        assertFalse(fj.require)
+        assertEquals(-1.0, Pca.IntentPolicy.fromJson(m("min_fidelity_ppm" to n("-1")))!!.minFidelityPpm!!, 0.0)
+        assertEquals(0.5, Pca.IntentPolicy.fromJson(m("max_residual_risk_ppm" to n("0.5")))!!.maxResidualRiskPpm!!, 0.0)
+        assertTrue(Pca.IntentPolicy.fromJson(m("max_residual_risk_ppm" to null))!!.maxResidualRiskPpm!!.isNaN())
+        assertTrue(Pca.IntentPolicy.fromJson(m("max_residual_risk_ppm" to true))!!.maxResidualRiskPpm!!.isNaN())
+        assertNull(Pca.IntentPolicy.fromJson(m("require" to true))!!.minFidelityPpm)
+        for (ok in listOf(null, 0.0, 1.0, 950000.0, 9007199254740991.0)) assertTrue("$ok", Pca.okThreshold(ok))
+        for (bad in listOf(-1.0, -0.0, 0.5, 1.5, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, 9007199254740992.0, -9007199254740991.0))
+            assertFalse("$bad", Pca.okThreshold(bad))
+    }
+
+    @Test fun intentKillDecide() {
+        val g = grantOf(envelope(intentCommit))
+        assertNull(decide(null, g, null))
+        assertNull(decide(null, g, pol()))
+        assertEquals(iNone, decide(null, g, pol(require = true)))
+        assertEquals(iNone, decide(null, g, pol(min = 0.0)))
+        assertEquals(iNone, decide(null, g, pol(max = 0.0)))
+        for (bad in listOf(-1.0, 0.5, Double.NaN, -0.0)) {
+            assertEquals("min $bad", iMis, decide(null, g, pol(min = bad)))
+            assertEquals("max $bad", iMis, decide(null, g, pol(require = true, max = bad)))
+            assertEquals("nogrant $bad", iMis, decide(intentSlot(), m(), pol(min = bad)))
+            assertEquals("valid min $bad", iMis, decide(intentSlot(), g, pol(min = 0.0, max = bad)))
+            assertEquals("valid max $bad", iMis, decide(intentSlot(), g, pol(min = bad, max = 0.0)))
+        }
+        assertEquals(iNoEnv, decide(intentSlot(), m(), pol(min = 1e6, max = 0.0)))
+        assertEquals("", decide(intentSlot(), g, null))
+        assertEquals("", decide(intentSlot(), g, pol()))
+        assertEquals("", decide(intentSlot(), g, pol(require = true)))
+        assertEquals("", decide(intentSlot(), g, pol(min = 950000.0)))
+        assertEquals("", decide(intentSlot(), g, pol(min = 949999.0)))
+        assertEquals("", decide(intentSlot(), g, pol(min = 0.0)))
+        assertEquals("intent fidelity 950000 ppm is below the policy minimum 950001", decide(intentSlot(), g, pol(min = 950001.0)))
+        assertEquals("", decide(intentSlot(), g, pol(max = 4310000.0)))
+        assertEquals("", decide(intentSlot(), g, pol(max = 4310001.0)))
+        assertEquals("intent residual risk 4310000 ppm exceeds the policy maximum 4309999", decide(intentSlot(), g, pol(max = 4309999.0)))
+        assertEquals("intent residual risk 4310000 ppm exceeds the policy maximum 0", decide(intentSlot(), g, pol(max = 0.0)))
+        assertEquals("intent fidelity 950000 ppm is below the policy minimum 950001", decide(intentSlot(), g, pol(min = 950001.0, max = 0.0)))
+        assertEquals("", decide(intentSlot(), g, pol(true, 950000.0, 4310000.0)))
+        val zero = intentSlot().also { it["fidelity_ppm"] = n("0"); it["residual_risk_ppm"] = n("0") }
+        assertEquals("", decide(zero, g, pol(min = 0.0, max = 0.0)))
+        assertEquals("intent fidelity 0 ppm is below the policy minimum 1", decide(zero, g, pol(min = 1.0)))
+        val top = intentSlot().also { it["fidelity_ppm"] = n("1000000"); it["residual_risk_ppm"] = n("9007199254740991") }
+        assertEquals("", decide(top, g, pol(min = 1e6, max = 9007199254740991.0)))
+        assertEquals("intent residual risk 9007199254740991 ppm exceeds the policy maximum 9007199254740990", decide(top, g, pol(max = 9007199254740990.0)))
+    }
+
+    @Test fun intentKillRootGrant() {
+        val env = envelope(intentCommit)
+        assertEquals("", decide(intentSlot(), grantOf(m("type" to "max_spend"), env), null))
+        assertEquals(iOpen, decide(intentSlot(), grantOf(envelope(B32), env), null))
+        assertEquals("", decide(intentSlot(), grantOf(env, envelope(B32)), null))
+        assertEquals(iNoEnv, decide(intentSlot(), grantOf(envelope(n("7")), env), null))
+        assertEquals("", decide(intentSlot(), grantOf("envelope", null, n("1"), l(env), m("type" to "Envelope", "goal_commit" to B32), m("goal_commit" to B32), env), null))
+        for (bad in listOf<Any?>(n("7"), null, true, l(), m())) assertEquals("$bad", iNoEnv, decide(intentSlot(), grantOf(envelope(bad)), null))
+        assertEquals(iNoEnv, decide(intentSlot(), grantOf(m("type" to "envelope")), null))
+        assertEquals(iNoEnv, decide(intentSlot(), m(), null))
+        assertEquals(iNoEnv, decide(intentSlot(), null, null))
+        assertEquals(iNoEnv, decide(intentSlot(), m("caveats" to m("0" to env)), null))
+        assertEquals(iNoEnv, decide(intentSlot(), m("caveats" to "x"), null))
+        assertEquals(iNoEnv, decide(intentSlot(), grantOf(), null))
+        assertEquals(iNoEnv, decide(intentSlot(), grantOf(m("type" to "max_spend")), null))
+        assertEquals(intentCommit, Pca.rootGoalCommit(grantOf("x", env, envelope(B32))))
+        assertNull(Pca.rootGoalCommit(null))
+        assertEquals(iOpen, decide(slotWith("ref", B32.replace('q', 'r')), grantOf(env), null))
+        assertEquals(iOpen, decide(slotWith("map_digest", Pca.b64(ByteArray(32))), grantOf(env), null))
+        assertEquals(iOpen, decide(slotWith("goal_salt", "salt "), grantOf(env), null))
+        assertEquals("", decide(slotWith("fidelity_ppm", n("1")), grantOf(env), null))
+        assertEquals("pca-intent:v1:r", Pca.intentGoal("r", null))
+        assertEquals("pca-intent:v1:r", Pca.intentGoal("r", ""))
+        assertEquals("pca-intent:v1:r", Pca.intentGoal("r"))
+        assertEquals("pca-intent:v1:r:m", Pca.intentGoal("r", "m"))
+        assertFalse(Pca.intentGoalCommit(B32, B32, "salt") == Pca.intentGoalCommit(B32, B32, "salt2"))
+    }
+
+    @Test fun intentKillVerifySigned() {
+        val of = Pca.Audience.Of(AUD)
+        val root = intentRoot()
+        var g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of)
+        assertTrue(g.reason, g.allow)
+        assertEquals(baseKeys, g.checks.keys.toList())
+        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol())
+        assertTrue(g.allow); assertEquals(baseKeys, g.checks.keys.toList())
+        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol(min = 0.0))
+        assertFalse(g.allow); assertEquals(intentKeys, g.checks.keys.toList())
+        assertEquals("intent: $iNone", g.reason)
+        val p = signedWithIntent(root, intentSlot())
+        g = Pca.verifyPcactn(p, root, NOW, of)
+        assertTrue(g.reason, g.allow)
+        assertEquals("", g.reason)
+        assertEquals(intentKeys, g.checks.keys.toList())
+        assertEquals(true, g.checks["intent"])
+        assertTrue(Pca.verifyPcactnJson(Json.canonicalizeStrict(p), root, NOW, of, intentPolicy = pol(require = true)).allow)
+        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(true, 950000.0, 4310000.0)).allow)
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = 950001.0))
+        assertFalse(g.allow)
+        assertEquals("intent: intent fidelity 950000 ppm is below the policy minimum 950001", g.reason)
+        for (k in baseKeys) assertEquals(k, true, g.checks[k])
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(max = 4309999.0))
+        assertFalse(g.allow); assertEquals(false, g.checks["intent"])
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = -1.0))
+        assertFalse(g.allow); assertEquals("intent: $iMis", g.reason)
+        val edge = intentSlot().also { it["fidelity_ppm"] = n("1000000"); it["residual_risk_ppm"] = n("0") }
+        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of).allow)
+        edge["fidelity_ppm"] = n("0"); edge["residual_risk_ppm"] = n("9007199254740991")
+        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of).allow)
+        // signed: tampering after signing breaks leaf_signature while the binding itself still holds
+        val t = signedWithIntent(root, intentSlot())
+        mm(t["intent"])["fidelity_ppm"] = n("999999")
+        g = Pca.verifyPcactn(t, root, NOW, of)
+        assertFalse(g.allow)
+        assertEquals(false, g.checks["leaf_signature"])
+        assertEquals(true, g.checks["intent"])
+        assertEquals(intentKeys, g.checks.keys.toList())
+        val s = signedWithIntent(root, intentSlot()).also { it.remove("intent") }
+        g = Pca.verifyPcactn(s, root, NOW, of)
+        assertEquals(false, g.checks["leaf_signature"])
+        assertEquals(baseKeys, g.checks.keys.toList())
+        g = Pca.verifyPcactn(signedWithIntent(root, slotWith("goal_salt", "other")), root, NOW, of)
+        assertEquals("intent: $iOpen", g.reason)
+        for (k in baseKeys) assertEquals(k, true, g.checks[k])
+        for (bad in listOf<Any?>(null, "x", l(), slotWith("fidelity_ppm", n("1000001")), slotWith("residual_risk_ppm", n("-1")), slotWith("goal_salt", "é".repeat(64) + "a"))) {
+            val w = signedWithIntent(root, intentSlot()).also { it["intent"] = bad }
+            g = Pca.verifyPcactn(w, root, NOW, of, intentPolicy = pol(require = true))
+            assertFalse(g.allow)
+            assertEquals("$bad", listOf("wire"), g.checks.keys.toList())
+            assertTrue(g.reason, g.reason.startsWith("wire: "))
+        }
+    }
+
+    @Test fun intentKillThresholdNumericValue() {
+        // validity is judged on the NUMERIC value, whatever the JSON spelling
+        for (ok in listOf("950000", "950000.0", "950000.00", "9.5e5", "1e6", "1E6", "1e+6", "10e5", "0", "0.0", "0e0", "9007199254740991", "9007199254740991.0")) {
+            val p = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":$ok,\"max_residual_risk_ppm\":$ok}")!!
+            assertTrue(ok, p.isActive)
+            assertTrue(ok, Pca.okThreshold(p.minFidelityPpm))
+            assertTrue(ok, Pca.okThreshold(p.maxResidualRiskPpm))
+        }
+        assertEquals(950000.0, Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.0}")!!.minFidelityPpm!!, 0.0)
+        assertEquals(1000000.0, Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":1e6}")!!.minFidelityPpm!!, 0.0)
+        val g = grantOf(envelope(intentCommit))
+        for (bad in listOf("950000.5", "0.5", "-1", "-1.0", "-0", "-0.0", "-0e0", "1e400", "-1e400", "9007199254740992", "1e16", "1e-7", "null", "true", "false", "\"5\"", "[]", "{}")) {
+            val p = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":$bad}")!!
+            assertTrue(bad, p.isActive)
+            assertFalse(bad, Pca.okThreshold(p.minFidelityPpm))
+            assertEquals(bad, iMis, decide(intentSlot(), g, p))
+            assertEquals(bad, iMis, decide(intentSlot(), g, Pca.IntentPolicy.fromJsonText("{\"max_residual_risk_ppm\":$bad}")))
+        }
+        assertTrue(Pca.okThreshold(950000.0))
+        assertTrue(Pca.okThreshold(1e6))
+        assertFalse(Pca.okThreshold(950000.5))
+        assertNull(Pca.IntentPolicy.fromJsonText("[]"))
+        assertNull(Pca.IntentPolicy.fromJsonText("null"))
+        assertFalse(Pca.IntentPolicy.fromJsonText("{}")!!.isActive)
+        assertTrue(Pca.IntentPolicy.fromJsonText("{\"require\":true}")!!.isActive)
+        assertEquals("", decide(intentSlot(), g, Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.0}")))
+        assertEquals("", decide(intentSlot(), g, Pca.IntentPolicy.fromJsonText("{\"max_residual_risk_ppm\":4.31e6}")))
+        assertEquals("intent fidelity 950000 ppm is below the policy minimum 1000000", decide(intentSlot(), g, Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":1e6}")))
+        assertEquals("intent residual risk 4310000 ppm exceeds the policy maximum 4309999", decide(intentSlot(), g, Pca.IntentPolicy.fromJsonText("{\"max_residual_risk_ppm\":4309999.0}")))
+        val of = Pca.Audience.Of(AUD)
+        val root = intentRoot()
+        val p = signedWithIntent(root, intentSlot())
+        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.0,\"max_residual_risk_ppm\":4.31e6}")).allow)
+        val v = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.5}"))
+        assertFalse(v.allow)
+        assertEquals("intent: $iMis", v.reason)
+        assertThrows(RuntimeException::class.java) { Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":}") }
+    }
 }

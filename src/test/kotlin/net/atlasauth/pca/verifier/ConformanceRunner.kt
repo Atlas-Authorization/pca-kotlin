@@ -10,11 +10,9 @@ import java.nio.file.Path
  * and asserts the verdict for every vector, then the primitive suites, and finally the cross-implementation
  * counterexamples under `tools/pca-diff-fuzz/counterexamples/`.
  *
- * This verifier implements the three CROSS-IMPL suites every verifier at parity must cover (GAP 1):
- * `ed25519`, `ml-dsa-65` and `hybrid-ed25519-ml-dsa-65`, for BOTH the leaf signature (`requires:"pq"`) AND
- * non-leaf capability-chain hops (`requires:"pq-nonleaf"`). A vector whose suite is a REGISTERED post-quantum
- * suite this verifier does not implement (ml-dsa-87, slh-dsa-*, the nested hybrid, and their hybrids) is
- * SKIPPED with an explicit per-suite count — never silently, never faked. Deliberately unknown-alg / stray-field
+ * This verifier implements the suites of its capability manifest ([Pq.supportedSuites]: every ML-DSA / SLH-DSA suite),
+ * for BOTH the leaf signature (`requires:"pq"`) AND non-leaf capability-chain hops (`requires:"pq-nonleaf"`). A vector
+ * whose suite is a REGISTERED suite outside the manifest must be refused with `unsupported_suite` (asserted, counted). Deliberately unknown-alg / stray-field
  * wire negatives still RUN (they are suite-agnostic fail-closed checks: an unregistered `alg` is terminal
  * `{wire:false}` and must be rejected). It also enforces the v2.1 agent-leaf share binding (GAP 2): a BARE
  * agent share and a cross-signer-set replay are REJECTED, a properly bound agent share is ACCEPTED.
@@ -23,15 +21,11 @@ import java.nio.file.Path
  *   java -cp <out>:<kotlin-stdlib>:<bcprov> net.atlasauth.pca.verifier.ConformanceRunnerKt [confDir] [ceDir]
  */
 
-/** The suites this verifier implements — the three cross-impl suites required at parity (GAP 1). */
-private val IMPLEMENTED_SUITES = setOf("ed25519", "ml-dsa-65", "hybrid-ed25519-ml-dsa-65")
+/** The suites this verifier implements: its capability manifest (packages/pca/conformance/SUITES.md). */
+private val IMPLEMENTED_SUITES = Pq.supportedSuites().toSet()
 
-/** Every registered suite in the corpus (README: 10 suites). */
-private val ALL_REGISTERED_SUITES = setOf(
-    "ed25519", "ml-dsa-65", "ml-dsa-87", "hybrid-ed25519-ml-dsa-65", "hybrid-ed25519-ml-dsa-87",
-    "hybrid-nested-ed25519-ml-dsa-65", "slh-dsa-sha2-128f", "slh-dsa-sha2-256s",
-    "hybrid-ed25519-slh-dsa-sha2-128f", "hybrid-ed25519-slh-dsa-sha2-256s",
-)
+/** Every registered suite (the TS registry). A vector needing one outside the manifest must fail with unsupported_suite. */
+private val ALL_REGISTERED_SUITES = Pq.REGISTERED_SUITES.toSet()
 
 /** primitives.depth `expand`: the marker string (value) / substring (text) becomes `levels` nested arrays around `leaf`, built iteratively. */
 @Suppress("UNCHECKED_CAST")
@@ -75,7 +69,7 @@ private fun depthVerdict(api: String, input: Any?): Boolean = when (api) {
 
 @Suppress("UNCHECKED_CAST")
 private fun load(p: String): Map<String, Any?> =
-    Json.parseLenient(Files.readString(Path.of(p))) as Map<String, Any?>
+    Json.parseLenient(String(Files.readAllBytes(Path.of(p)), Charsets.UTF_8)) as Map<String, Any?>
 
 /**
  * The set of signature suites a vector exercises: the leaf `alg` plus every cap-chain hop `alg`. An absent
@@ -145,6 +139,13 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
             skipped++
             skipBySuite[unsupported] = (skipBySuite[unsupported] ?: 0) + 1
             println("SKIP ${v["name"]} (unimplemented suite: $unsupported)")
+            if (v["pcactn"] is Map<*, *>) {
+                val uctx = v["context"] as Map<String, Any?>
+                val ug = Pca.verifyPcactn(v["pcactn"], v["grant"] as Map<String, Any?>, Json.asLong(uctx["now"]),
+                    Pca.Audience.Of(uctx["aud"] as String), null, null)
+                check(!ug.allow && ug.reason.contains(Pq.UNSUPPORTED_SUITE),
+                    "${v["name"]}: suite $unsupported is not implemented, so it must fail with unsupported_suite (${ug.reason})")
+            }
             continue
         }
 
@@ -155,10 +156,26 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         val audience = if (aud is String) Pca.Audience.Of(aud) else Pca.Audience.Unset
         val grant = v["grant"] as Map<String, Any?>
         val allowedSuites = (ctx["allowed_suites"] as? List<*>)?.map { it.toString() }
+        // Intent Layer M2: `intent-*` vectors may carry context.intent_policy (an object) or context.intent_policy_json
+        // (raw JSON text, parsed with this SDK's parser; it wins when both are present). Absent = no policy.
+        val intentPolicy = intentPolicyOf(ctx)
+        // Intent Layer v2: `schema-*` / `session-*` / `acc-*` / `layers-*` vectors carry the verifier state in context.intent_v2.
+        val intentV2 = intentV2Of(ctx)
         val got = if (v.containsKey("pcactn_json"))
-            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience, allowedSuites)
-        else Pca.verifyPcactn(v["pcactn"], grant, now, audience, allowedSuites)
+            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience, allowedSuites, intentPolicy, intentV2)
+        else Pca.verifyPcactn(v["pcactn"], grant, now, audience, allowedSuites, intentPolicy, intentV2)
         val exp = v["expect"] as Map<String, Any?>
+        // Intent Layer v2: a vector whose v2 artifacts need a suite this verifier lacks must FAIL closed with unsupported_suite
+        val missingSuite = missingRequiredSuite(v["requires_suite"])
+        if (missingSuite != null) {
+            check(!got.allow && got.reason.contains(IntentJs.UNSUPPORTED_SUITE),
+                "${v["name"]}: requires_suite $missingSuite not implemented, so it must fail with unsupported_suite (${got.reason})")
+            ran++
+            continue
+        }
+        val reasonContains = exp["reason_contains"]
+        if (reasonContains is String)
+            check(got.reason.contains(reasonContains), "${v["name"]}: reason '${got.reason}' does not contain $reasonContains")
         val wantAllow = exp["allow"]
         check(got.allow == wantAllow, "${v["name"]}: allow=${got.allow} want $wantAllow (${got.reason})")
         val want = exp["checks"] as Map<String, Any?>
@@ -245,6 +262,12 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         val wantValid = !e.containsKey("valid") || e["valid"] == true
         val gotValid = Threshold.verifyShare(role, tmsg, signerSet, t, share)
         val nm = e["name"] as? String ?: "$role-t$t"
+        // Suite capability: an entry whose `requires` suite this verifier lacks is not compared; it must be refused.
+        val req = e["requires"] as? String
+        if (req != null && req !in IMPLEMENTED_SUITES) {
+            check(!gotValid, "threshold_share $nm: share under unsupported suite $req verified (want fail closed)")
+            continue
+        }
         check(gotValid == wantValid, "threshold_share $nm: verify=$gotValid want $wantValid")
         shareChecks++
         when (nm) {
@@ -377,6 +400,36 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
     // primitives.pca_header is N/A here: this verifier has no HTTP middleware and decodes no PCA-Action header.
     println("PCA_HEADER: N/A (no HTTP middleware in the Kotlin verifier), ${(prim["pca_header"] as? List<*>)?.size ?: 0} vectors not applicable")
 
+    // ---- Intent Layer v2 primitives (rules 13 step 7, 14, 16, 17, 18); reason strings are never compared ----
+    for (kind in INTENT_PRIMITIVE_KINDS) {
+        val entries = prim[kind] as? List<*>
+        if (entries == null) { println("${kind.uppercase()}: absent"); continue }
+        var n = 0
+        for (x in entries) {
+            val e = x as Map<String, Any?>
+            val why: String? = try {
+                val exp = e["expect"] as Map<String, Any?>
+                val missingSuite = missingRequiredSuite(e["requires_suite"])
+                val input = inputOf(e)
+                val reason = intentPrimitiveReason(kind, input)
+                if (missingSuite != null) {
+                    if (reason != null && reason.contains(IntentJs.UNSUPPORTED_SUITE)) null
+                    else "requires_suite $missingSuite: must fail with unsupported_suite ($reason)"
+                } else {
+                    val rc = exp["reason_contains"]
+                    intentPrimitiveMismatch(kind, input, exp)
+                        ?: if (rc is String && (reason == null || !reason.contains(rc))) "reason '$reason' does not contain $rc" else null
+                }
+            } catch (th: Throwable) {
+                "THREW $th"
+            }
+            check(why == null, "$kind ${e["name"]}: $why")
+            n++
+        }
+        check(n >= 1, "$kind primitives present ($n)")
+        println("${kind.uppercase()}: $n run")
+    }
+
     // ---- report --------------------------------------------------------------------------------------------
     println("VECTORS: ${ran + skipped} total = $ran run (${ran - vecFails} passed, $vecFails failed), $skipped skipped")
     if (skipBySuite.isNotEmpty()) {
@@ -391,13 +444,13 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
     // ---- cross-implementation counterexamples (the fuzz oracle is normative for a strict verifier) ---------
     val ceIndexPath = Path.of(ceDir + "INDEX.json")
     if (Files.exists(ceIndexPath)) {
-        val index = Json.parseLenient(Files.readString(ceIndexPath)) as List<Any?>
+        val index = Json.parseLenient(String(Files.readAllBytes(ceIndexPath), Charsets.UTF_8)) as List<Any?>
         var ceFails = 0
         for (e in index) {
             val entry = e as Map<String, Any?>
             val file = entry["file"] as String
             val before = fails
-            val cx = Json.parseLenient(Files.readString(Path.of(ceDir + file))) as Map<String, Any?>
+            val cx = Json.parseLenient(String(Files.readAllBytes(Path.of(ceDir + file)), Charsets.UTF_8)) as Map<String, Any?>
             val ctx = cx["context"] as Map<String, Any?>
             val now = Json.asLong(ctx["now"])
             val aud = ctx["aud"]
@@ -405,9 +458,11 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
             // In the fuzz corpus the grant capability is carried as a JSON-encoded string.
             val grantRaw = cx["grant"]
             val grant = (if (grantRaw is String) Json.parseLenient(grantRaw) else grantRaw) as Map<String, Any?>
+            val ip = intentPolicyOf(ctx)
+            val iv2 = intentV2Of(ctx)
             val got = if (cx.containsKey("pcactn_json"))
-                Pca.verifyPcactnJson(cx["pcactn_json"] as String, grant, now, audience)
-            else Pca.verifyPcactn(cx["pcactn"], grant, now, audience)
+                Pca.verifyPcactnJson(cx["pcactn_json"] as String, grant, now, audience, intentPolicy = ip, intentV2 = iv2)
+            else Pca.verifyPcactn(cx["pcactn"], grant, now, audience, intentPolicy = ip, intentV2 = iv2)
             // Expected verdict = the oracle result when present, else the INDEX allow flag.
             val results = cx["results"] as? Map<String, Any?>
             val oracle = results?.get("oracle") as? Map<String, Any?>
@@ -433,4 +488,113 @@ fun main(args: Array<String>) {
     val confDir = if (args.isNotEmpty()) args[0] else "conformance/"
     val ceDir = if (args.size > 1) args[1] else "../../tools/pca-diff-fuzz/counterexamples/"
     System.exit(if (runConformance(confDir, ceDir) == 0) 0 else 1)
+}
+
+/** Intent Layer M2: a context's policy: `intent_policy_json` (raw JSON text, parsed here) wins over `intent_policy`. */
+internal fun intentPolicyOf(ctx: Map<String, Any?>): Pca.IntentPolicy? =
+    if (ctx["intent_policy_json"] is String) Pca.IntentPolicy.fromJsonText(ctx["intent_policy_json"] as String)
+    else Pca.IntentPolicy.fromJson(ctx["intent_policy"])
+
+/** Intent Layer v2: the verifier state of a context (`intent_v2` when PRESENT, even as null: a non-object is malformed). */
+internal fun intentV2Of(ctx: Map<String, Any?>): IntentV2.Context? =
+    if (ctx.containsKey("intent_v2")) IntentV2.Context.fromJson(ctx["intent_v2"]) else null
+
+/** A primitive's input: `input_json` (raw JSON text, parsed with this SDK's parser) takes precedence over `input`. */
+internal fun inputOf(e: Map<String, Any?>): Any? = (e["input_json"] as? String)?.let { Json.parseLenient(it) } ?: e["input"]
+
+/** The Intent Layer v2 primitive kinds of `primitives`, in corpus order. */
+internal val INTENT_PRIMITIVE_KINDS = listOf("intent_schema", "intent_revocation", "intent_world", "intent_provenance", "intent_classifier", "intent_wb_active", "intent_map_commit", "intent_map", "intent_read_purpose")
+
+/** The first suite a v2 vector's `requires_suite` (a string or a list) names that this verifier does not implement, else null. */
+internal fun missingRequiredSuite(rs: Any?): String? {
+    val implemented = Pq.supportedSuites()
+    if (rs is String) return if (rs in implemented) null else rs
+    if (rs is List<*>) for (s in rs) if (s is String && s !in implemented) return s
+    return null
+}
+
+/** The refusal reason of an Intent Layer v2 primitive (null when it passes). */
+@Suppress("UNCHECKED_CAST")
+internal fun intentPrimitiveReason(kind: String, input: Any?): String? = when (kind) {
+    "intent_schema" -> {
+        val inp = IntentJs.normalize(input) as Map<String, Any?>
+        ActionSchema.verify(inp["schema"], inp["keys"]) ?: ActionSchema.conform(inp["schema"], inp["verb"] as String, inp["params"]).reason
+    }
+    "intent_revocation" -> IntentRevocation.primitiveReason(input)
+    "intent_world" -> OracleFacts.decideIntentWorld(input).reason
+    "intent_provenance" -> ParamProvenance.decide(input).reason
+    "intent_classifier" -> IntentClassifier.decide(input).reason
+    "intent_map" -> IntentMap.decidePrimitive(input).reason
+    else -> null
+}
+
+/**
+ * The Intent Layer v2 primitive verdicts compared exactly as the README says: intent_schema {sig, digest when sig, conform
+ * {ok, code?, path?}}; intent_revocation {ok}; intent_world ok (+ world, single_source when ok); intent_provenance outcome
+ * (+ labels, classes unless deny, friction for a question); intent_classifier ok (+ classes when ok); intent_wb_active
+ * {facts, provenance, classes}. Null = match.
+ */
+@Suppress("UNCHECKED_CAST")
+internal fun intentPrimitiveMismatch(kind: String, input: Any?, exp: Map<String, Any?>): String? {
+    fun canonOf(o: Any?): String = Json.canonicalize(o)
+    when (kind) {
+        "intent_schema" -> {
+            val inp = IntentJs.normalize(input) as Map<String, Any?>
+            val sig = ActionSchema.verify(inp["schema"], inp["keys"]) == null
+            if (sig != exp["sig"]) return "sig=$sig"
+            if (sig && ActionSchema.digest(inp["schema"]) != exp["digest"]) return "digest"
+            val c = ActionSchema.conform(inp["schema"], inp["verb"] as String, inp["params"])
+            val wc = exp["conform"] as Map<String, Any?>
+            if (c.ok != wc["ok"]) return "conform.ok=${c.ok} (${c.code})"
+            if (!c.ok && c.code != wc["code"]) return "conform.code=${c.code}"
+            if (!c.ok && c.path != wc["path"]) return "conform.path=${c.path}"
+            return null
+        }
+        "intent_revocation" -> {
+            val ok = IntentRevocation.checkPrimitive(input)
+            return if (ok == exp["ok"]) null else "ok=$ok"
+        }
+        "intent_world" -> {
+            val r = OracleFacts.decideIntentWorld(input)
+            if (r.ok != exp["ok"]) return "ok=${r.ok} (${r.reason})"
+            if (r.ok && canonOf(r.world) != canonOf(exp["world"])) return "world=${canonOf(r.world)}"
+            if (r.ok && canonOf(r.singleSource) != canonOf(exp["single_source"])) return "single_source=${r.singleSource}"
+            return null
+        }
+        "intent_provenance" -> {
+            val r = ParamProvenance.decide(input)
+            if (r.outcome != exp["outcome"]) return "outcome=${r.outcome} (${r.reason})"
+            if (r.outcome == "deny") return null
+            if (canonOf(r.labels) != canonOf(exp["labels"])) return "labels=${canonOf(r.labels)}"
+            if (canonOf(r.classes) != canonOf(exp["classes"])) return "classes=${canonOf(r.classes)}"
+            if (r.outcome == "question" && r.friction != exp["friction"]) return "friction=${r.friction}"
+            return null
+        }
+        "intent_wb_active" -> {
+            val a = IntentWB.active(input)
+            return if (a[0] == exp["facts"] && a[1] == exp["provenance"] && a[2] == exp["classes"]) null else "active=${a.toList()}"
+        }
+        "intent_read_purpose" -> {
+            val r = ParamProvenance.decideReadPurpose(input)
+            val got = linkedMapOf<String, Any?>("outcome" to r.outcome, "minimise" to r.minimise, "uncovered" to r.uncovered)
+            return if (canonOf(got) == canonOf(exp)) null else "got ${canonOf(got)}"
+        }
+        "intent_map_commit" -> {
+            val c = IntentMap.commitLeaves((input as Map<String, Any?>)["leaves"])
+            return if (c == exp["map_commit"]) null else "map_commit=$c"
+        }
+        "intent_map" -> {
+            val d = IntentMap.decidePrimitive(input)
+            if (d.ok != exp["ok"]) return "ok=${d.ok} (${d.reason})"
+            if (d.ok && canonOf(d.cell) != canonOf(exp["cell"])) return "cell=${d.cell}"
+            if (d.ok && d.pPpm != Json.asLong(exp["p_ppm"])) return "p_ppm=${d.pPpm}"
+            return null
+        }
+        else -> {
+            val r = IntentClassifier.decide(input)
+            if (r.ok != exp["ok"]) return "ok=${r.ok} (${r.reason})"
+            if (r.ok && canonOf(r.classes) != canonOf(exp["classes"])) return "classes=${canonOf(r.classes)}"
+            return null
+        }
+    }
 }
