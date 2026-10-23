@@ -3,6 +3,9 @@ package net.atlasauth.pca.verifier
 import org.bouncycastle.pqc.crypto.mldsa.MLDSAParameters
 import org.bouncycastle.pqc.crypto.mldsa.MLDSAPublicKeyParameters
 import org.bouncycastle.pqc.crypto.mldsa.MLDSASigner
+import org.bouncycastle.pqc.crypto.slhdsa.SLHDSAParameters
+import org.bouncycastle.pqc.crypto.slhdsa.SLHDSAPublicKeyParameters
+import org.bouncycastle.pqc.crypto.slhdsa.SLHDSASigner
 
 /**
  * B4 — post-quantum crypto-agility, mirroring `packages/pca/src/pq.ts` (and the Java / Go / Swift / .NET SDKs).
@@ -26,6 +29,13 @@ import org.bouncycastle.pqc.crypto.mldsa.MLDSASigner
  * FIPS-204, 192-bit category-3 parameter set), pure variant with an EMPTY context — byte-compatible with
  * `@noble/post-quantum`'s `ml_dsa65` and circl's `mldsa65`. ML-DSA-65 sizes: public key 1952 bytes, signature
  * 3309 bytes. Requires BouncyCastle >= 1.80 (final FIPS-204 naming).
+ *
+ * Suite capability (`packages/pca/conformance/SUITES.md`): every registered suite BouncyCastle provides is implemented,
+ * pure mode, EMPTY context: ML-DSA-65 / ML-DSA-87 (FIPS 204, `MLDSASigner`), SLH-DSA-SHA2-128f / SLH-DSA-SHA2-256s
+ * (FIPS 205, `SLHDSASigner`), their `hybrid-ed25519-*` forms (the Ed25519 half is checked first) and the SUF-CMA
+ * `hybrid-nested-ed25519-ml-dsa-65` (the PQ half signs msg || the Ed25519 signature bytes). FN-DSA (BouncyCastle ships
+ * round-3 Falcon, not the FIPS 206 encoding) is refused with the distinct reason `unsupported_suite: <alg>`; so is LESS
+ * unless [LessNative] has a runtime and `libatlas_less` (its signature is variable-length, see [Prim.sigLenOk]).
  */
 object Pq {
     /** ML-DSA-65 (FIPS-204, category 3) encoded sizes, in bytes. */
@@ -35,26 +45,76 @@ object Pq {
     /** Ed25519 signature length, in bytes (unchanged classical suite). */
     const val ED25519_SIGNATURE_BYTES = 64
 
-    /** A signature suite: the decoded `sig` byte length and which components / fields it requires. */
+    /** The reason token of a registered suite this verifier does not implement (full reason `unsupported_suite: <alg>`). */
+    const val UNSUPPORTED_SUITE = "unsupported_suite"
+
+    /** The closed TS suite registry (`SIG_SUITES` in pq.ts), in registry order. */
+    val REGISTERED_SUITES: List<String> = listOf(
+        "ed25519", "ml-dsa-65", "hybrid-ed25519-ml-dsa-65", "hybrid-nested-ed25519-ml-dsa-65", "slh-dsa-sha2-128f",
+        "hybrid-ed25519-slh-dsa-sha2-128f", "ml-dsa-87", "hybrid-ed25519-ml-dsa-87", "slh-dsa-sha2-256s",
+        "hybrid-ed25519-slh-dsa-sha2-256s", "fn-dsa-512", "fn-dsa-1024", "less-cat1", "hybrid-ed25519-less-cat1",
+    )
+
+    /** The post-quantum primitive of a suite, with its (public key, signature) byte lengths. */
+    enum class Prim(val pkBytes: Int, val sigBytes: Int) {
+        ML_DSA_65(ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES),
+        ML_DSA_87(2592, 4627),
+        SLH_DSA_SHA2_128F(32, 17088),
+        SLH_DSA_SHA2_256S(64, 29792),
+
+        /** LESS (less-252-45) through [LessNative]; `sigBytes` is the MAXIMUM signature length. */
+        LESS_CAT1(LessNative.PUBLIC_KEY_BYTES, LessNative.SIGNATURE_MAX_BYTES),
+        ;
+
+        /** `n` is a signature length of this primitive: its fixed length, or (LESS) any length the parameter set produces. */
+        fun sigLenOk(n: Int): Boolean = if (this == LESS_CAT1) LessNative.sigLenOk(n) else n == sigBytes
+    }
+
+    /** A signature suite: the decoded `sig` byte length, its PQ primitive (null for ed25519) and which fields it requires. */
     data class Suite(
         val alg: String,
         val sigBytes: Int,
         val hasEd25519: Boolean,
-        val hasMlDsa: Boolean,
+        val pq: Prim?,
         val needsPqPk: Boolean,
         val needsPqSig: Boolean,
+        /** SUF-CMA nested hybrid: the PQ half signs msg || the Ed25519 signature bytes. */
+        val nested: Boolean = false,
     )
 
     /** The default suite used when `alg` is absent — the pre-B4 default. MUST stay "ed25519" forever. */
     const val DEFAULT_SIG_ALG = "ed25519"
 
-    /** The closed algorithm registry. `ed25519` is first so the default path is the common one. */
+    private fun pure(alg: String, p: Prim) = alg to Suite(alg, p.sigBytes, false, p, true, false)
+    private fun hybrid(alg: String, p: Prim, nested: Boolean = false) =
+        alg to Suite(alg, ED25519_SIGNATURE_BYTES, true, p, true, true, nested)
+
+    /** The suites this verifier implements (a subset of [REGISTERED_SUITES]). `ed25519` first: the common path. */
     private val SUITES: Map<String, Suite> = linkedMapOf(
-        "ed25519" to Suite("ed25519", ED25519_SIGNATURE_BYTES, true, false, false, false),
-        "ml-dsa-65" to Suite("ml-dsa-65", ML_DSA_65_SIGNATURE_BYTES, false, true, true, false),
-        "hybrid-ed25519-ml-dsa-65" to
-            Suite("hybrid-ed25519-ml-dsa-65", ED25519_SIGNATURE_BYTES, true, true, true, true),
-    )
+        "ed25519" to Suite("ed25519", ED25519_SIGNATURE_BYTES, true, null, false, false),
+        pure("ml-dsa-65", Prim.ML_DSA_65),
+        hybrid("hybrid-ed25519-ml-dsa-65", Prim.ML_DSA_65),
+        hybrid("hybrid-nested-ed25519-ml-dsa-65", Prim.ML_DSA_65, nested = true),
+        pure("slh-dsa-sha2-128f", Prim.SLH_DSA_SHA2_128F),
+        hybrid("hybrid-ed25519-slh-dsa-sha2-128f", Prim.SLH_DSA_SHA2_128F),
+        pure("ml-dsa-87", Prim.ML_DSA_87),
+        hybrid("hybrid-ed25519-ml-dsa-87", Prim.ML_DSA_87),
+        pure("slh-dsa-sha2-256s", Prim.SLH_DSA_SHA2_256S),
+        hybrid("hybrid-ed25519-slh-dsa-sha2-256s", Prim.SLH_DSA_SHA2_256S),
+    ).apply {
+        if (LessNative.available) {
+            this += pure("less-cat1", Prim.LESS_CAT1)
+            this += hybrid("hybrid-ed25519-less-cat1", Prim.LESS_CAT1)
+        }
+    }
+
+    /** The capability manifest: the registered suites this verifier implements, in registry order. */
+    fun supportedSuites(): List<String> = REGISTERED_SUITES.filter { it in SUITES }
+
+    /** The refusal of an `alg` this verifier does not resolve: `unsupported_suite: <alg>` for a registered suite, else
+     *  `unknown signature alg '<alg>'`. */
+    fun refusal(alg: Any?): String =
+        if (alg is String && alg in REGISTERED_SUITES) "$UNSUPPORTED_SUITE: $alg" else "unknown signature alg '$alg'"
 
     /**
      * Resolve the suite for a PCActn `alg` value. `algPresent` is false when the field is absent (=> default
@@ -66,30 +126,54 @@ object Pq {
         return SUITES[alg]
     }
 
+    /** Canonical base64url whose decoded length is a signature length of `p`. */
+    internal fun pqSigOk(p: Prim, v: Any?): Boolean = Pca.decodeB64uStrict(v, -1)?.let { p.sigLenOk(it.size) } ?: false
+
+    /** The primary `sig`: the PQ signature for a pure suite (its length rule), else the 64-byte Ed25519 one. */
+    private fun sigFieldOk(suite: Suite, v: Any?): Boolean =
+        if (suite.pq != null && !suite.needsPqSig) pqSigOk(suite.pq, v) else Pca.decodeB64uStrict(v, suite.sigBytes) != null
+
     // ---- ML-DSA-65 verification -------------------------------------------------------------
 
-    /** ML-DSA-65 verify over raw bytes (pure variant, empty context). Never throws; wrong length / bad input => false. */
-    fun mlDsa65Verify(pk: ByteArray?, msg: ByteArray, sig: ByteArray?): Boolean {
-        if (pk == null || sig == null || pk.size != ML_DSA_65_PUBLIC_KEY_BYTES || sig.size != ML_DSA_65_SIGNATURE_BYTES)
-            return false
+    /** PQ verify over raw bytes (pure variant, empty context). Never throws; wrong length / bad input => false. */
+    fun pqVerify(p: Prim, pk: ByteArray?, msg: ByteArray, sig: ByteArray?): Boolean {
+        if (pk == null || sig == null || pk.size != p.pkBytes || !p.sigLenOk(sig.size)) return false
+        if (p == Prim.LESS_CAT1) return LessNative.verify(pk, msg, sig)
         return try {
-            val pub = MLDSAPublicKeyParameters(MLDSAParameters.ml_dsa_65, pk)
-            val v = MLDSASigner() // pure ML-DSA, empty context (matches @noble / circl)
-            v.init(false, pub)
-            v.update(msg, 0, msg.size)
-            v.verifySignature(sig)
+            when (p) {
+                Prim.ML_DSA_65, Prim.ML_DSA_87 -> {
+                    val ps = if (p == Prim.ML_DSA_65) MLDSAParameters.ml_dsa_65 else MLDSAParameters.ml_dsa_87
+                    val v = MLDSASigner() // pure ML-DSA, empty context (matches @noble / circl)
+                    v.init(false, MLDSAPublicKeyParameters(ps, pk))
+                    v.update(msg, 0, msg.size)
+                    v.verifySignature(sig)
+                }
+                Prim.SLH_DSA_SHA2_128F, Prim.SLH_DSA_SHA2_256S -> {
+                    val ps = if (p == Prim.SLH_DSA_SHA2_128F) SLHDSAParameters.sha2_128f else SLHDSAParameters.sha2_256s
+                    val v = SLHDSASigner() // pure SLH-DSA, empty context
+                    v.init(false, SLHDSAPublicKeyParameters(ps, pk))
+                    v.verifySignature(msg, sig)
+                }
+                Prim.LESS_CAT1 -> false // handled above
+            }
         } catch (e: RuntimeException) {
             false
         }
     }
 
-    /** [mlDsa65Verify] over base64url-encoded key and signature; false on any decoding error. */
-    fun mlDsa65VerifyB64u(pkB64u: Any?, msg: ByteArray, sigB64u: Any?): Boolean {
-        val pk = Pca.decodeB64uStrict(pkB64u, ML_DSA_65_PUBLIC_KEY_BYTES)
-        val sg = Pca.decodeB64uStrict(sigB64u, ML_DSA_65_SIGNATURE_BYTES)
+    /** ML-DSA-65 verify over raw bytes (pure variant, empty context). Never throws; wrong length / bad input => false. */
+    fun mlDsa65Verify(pk: ByteArray?, msg: ByteArray, sig: ByteArray?): Boolean = pqVerify(Prim.ML_DSA_65, pk, msg, sig)
+
+    /** [pqVerify] over base64url-encoded key and signature; false on any decoding error. */
+    fun pqVerifyB64u(p: Prim, pkB64u: Any?, msg: ByteArray, sigB64u: Any?): Boolean {
+        val pk = Pca.decodeB64uStrict(pkB64u, p.pkBytes)
+        val sg = Pca.decodeB64uStrict(sigB64u, -1)?.takeIf { p.sigLenOk(it.size) }
         if (pk == null || sg == null) return false
-        return mlDsa65Verify(pk, msg, sg)
+        return pqVerify(p, pk, msg, sg)
     }
+
+    /** [mlDsa65Verify] over base64url-encoded key and signature; false on any decoding error. */
+    fun mlDsa65VerifyB64u(pkB64u: Any?, msg: ByteArray, sigB64u: Any?): Boolean = pqVerifyB64u(Prim.ML_DSA_65, pkB64u, msg, sigB64u)
 
     // ---- wire-shape validation of the signature fields --------------------------------------
 
@@ -102,20 +186,22 @@ object Pq {
         val algPresent = p.containsKey("alg")
         val algV = p["alg"]
         if (algPresent && algV !is String) return "'alg' must be a string"
-        val suite = resolveSigAlg(algV, algPresent) ?: return "unknown signature alg '$algV'"
+        val suite = resolveSigAlg(algV, algPresent) ?: return refusal(algV)
 
-        if (Pca.decodeB64uStrict(p["sig"], suite.sigBytes) == null)
+        if (!sigFieldOk(suite, p["sig"]))
             return "'sig' is not canonical base64url (${suite.sigBytes} bytes) for alg '${suite.alg}'"
 
         if (suite.needsPqPk) {
-            if (Pca.decodeB64uStrict(p["pq_pk"], ML_DSA_65_PUBLIC_KEY_BYTES) == null)
-                return "'pq_pk' is not canonical base64url ($ML_DSA_65_PUBLIC_KEY_BYTES bytes)"
+            val pkLen = suite.pq!!.pkBytes
+            if (Pca.decodeB64uStrict(p["pq_pk"], pkLen) == null)
+                return "'pq_pk' is not canonical base64url ($pkLen bytes)"
         } else if (p.containsKey("pq_pk")) {
             return "'pq_pk' must be absent for alg '${suite.alg}'"
         }
         if (suite.needsPqSig) {
-            if (Pca.decodeB64uStrict(p["pq_sig"], ML_DSA_65_SIGNATURE_BYTES) == null)
-                return "'pq_sig' is not canonical base64url ($ML_DSA_65_SIGNATURE_BYTES bytes)"
+            val pqSigLen = suite.pq!!.sigBytes
+            if (!pqSigOk(suite.pq!!, p["pq_sig"]))
+                return "'pq_sig' is not canonical base64url ($pqSigLen bytes)"
         } else if (p.containsKey("pq_sig")) {
             return "'pq_sig' must be absent for alg '${suite.alg}'"
         }
@@ -134,12 +220,13 @@ object Pq {
         val algPresent = s.containsKey("alg")
         val algV = s["alg"]
         if (algPresent && algV !is String) return "'alg' must be a string"
-        val suite = resolveSigAlg(algV, algPresent) ?: return "unknown signature alg '$algV'"
-        if (Pca.decodeB64uStrict(s["sig"], suite.sigBytes) == null)
+        val suite = resolveSigAlg(algV, algPresent) ?: return refusal(algV)
+        if (!sigFieldOk(suite, s["sig"]))
             return "'sig' is not canonical base64url (${suite.sigBytes} bytes) for alg '${suite.alg}'"
         if (suite.needsPqSig) {
-            if (Pca.decodeB64uStrict(s["pq_sig"], ML_DSA_65_SIGNATURE_BYTES) == null)
-                return "'pq_sig' is not canonical base64url ($ML_DSA_65_SIGNATURE_BYTES bytes) for alg '${suite.alg}'"
+            val pqSigLen = suite.pq!!.sigBytes
+            if (!pqSigOk(suite.pq!!, s["pq_sig"]))
+                return "'pq_sig' is not canonical base64url ($pqSigLen bytes) for alg '${suite.alg}'"
         } else if (s.containsKey("pq_sig")) {
             return "'pq_sig' must be absent for alg '${suite.alg}'"
         }
@@ -185,15 +272,16 @@ object Pq {
     ): Boolean {
         val suite = resolveSigAlg(alg, algPresent) ?: return false
         if (sig !is String) return false
-        return when (suite.alg) {
-            "ed25519" -> Pca.verifyB64u(holder, msg, sig)
-            "ml-dsa-65" -> pq != null && mlDsa65VerifyB64u(pq.key, msg, sig)
-            "hybrid-ed25519-ml-dsa-65" -> {
-                if (pqSig !is String) return false
-                Pca.verifyB64u(holder, msg, sig) && pq != null && mlDsa65VerifyB64u(pq.key, msg, pqSig)
-            }
-            else -> false
-        }
+        val prim = suite.pq ?: return Pca.verifyB64u(holder, msg, sig)
+        if (pq == null) return false
+        if (!suite.needsPqSig) return pqVerifyB64u(prim, pq.key, msg, sig) // pure PQ: `sig` is the PQ signature
+        // hybrid: the cheap Ed25519 half first (R6-API-04), then the PQ `pq_sig` (nested: over msg || Ed25519 sig bytes)
+        if (pqSig !is String || !Pca.verifyB64u(holder, msg, sig)) return false
+        val pqMsg = if (suite.nested) {
+            val edSig = Pca.decodeB64uStrict(sig, ED25519_SIGNATURE_BYTES) ?: return false
+            msg + edSig
+        } else msg
+        return pqVerifyB64u(prim, pq.key, pqMsg, pqSig)
     }
 
     /**

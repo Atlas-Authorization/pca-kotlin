@@ -1,0 +1,66 @@
+name: CI
+
+# The Android library (step-up + verifier) builds and runs its JVM unit tests with Gradle (incl. ConformanceTest over the
+# shared corpus, conformance/vectors.json); the pure-JVM verifier is also built and tested with Maven.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gradle:
+    name: gradle ${{ matrix.task }} (Android library)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [assembleRelease, testDebugUnitTest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full adversarial corpus from the flagship
+        run: .github/scripts/fetch-flagship-corpus.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: gradle ${{ matrix.task }}
+        run: gradle --no-daemon ${{ matrix.task }}
+
+  jvm-verifier:
+    name: verifier on the JVM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # JDK 23: the verifier's LESS backend uses the FFM API (JDK 22+)
+    env:
+      JDK_JAVA_OPTIONS: --enable-native-access=ALL-UNNAMED
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      # SnapshotTest locates the mutation-oracle inputs by the source layout (../../tools/pca-audit from the repo): rebuild it
+      - name: Source layout (full shared corpus from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca $([ "$RUNNER_OS" = Windows ] || echo --less)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+          cache: maven
+      - name: Build + verifier tests + conformance corpus
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test

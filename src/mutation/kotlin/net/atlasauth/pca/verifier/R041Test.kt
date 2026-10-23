@@ -42,7 +42,7 @@ class R041Test {
         assertEquals("'pq_sig' must be absent for alg 'ed25519'", sw(share("sig" to b(64), "pq_sig" to b(3309))))
         assertEquals("'pq_sig' must be absent for alg 'ml-dsa-65'", sw(share("alg" to "ml-dsa-65", "sig" to b(3309), "pq_sig" to b(3309))))
         assertEquals("'pq_sig' must be absent for alg 'ed25519'", sw(share("sig" to b(64), "pq_sig" to null)))
-        assertEquals("unknown signature alg 'ml-dsa-87'", sw(share("alg" to "ml-dsa-87", "sig" to b(4627))))
+        assertEquals("unknown signature alg 'ml-dsa-44'", sw(share("alg" to "ml-dsa-44", "sig" to b(2420))))
         assertEquals("'alg' must be a string", sw(share("alg" to n("1"), "sig" to b(64))))
         assertEquals("'alg' must be a string", sw(share("alg" to null, "sig" to b(64))))
         assertNotNull(sw(share("alg" to "ml-dsa-65", "sig" to b(3309) + "=")))
