@@ -49,8 +49,42 @@ object ReasonSnapshot {
         val audience = if (aud is String) Pca.Audience.Of(aud) else Pca.Audience.Unset
         val allowed = (ctx["allowed_suites"] as? List<*>)?.map { it.toString() }
         val grant = v["grant"] as Map<String, Any?>
-        return if (v.containsKey("pcactn_json")) Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, Json.asLong(ctx["now"]), audience, allowed)
-        else Pca.verifyPcactn(v["pcactn"], grant, Json.asLong(ctx["now"]), audience, allowed)
+        val ip = if (ctx["intent_policy_json"] is String) Pca.IntentPolicy.fromJsonText(ctx["intent_policy_json"] as String)
+            else Pca.IntentPolicy.fromJson(ctx["intent_policy"])
+        val v2 = if (ctx.containsKey("intent_v2")) IntentV2.Context.fromJson(ctx["intent_v2"]) else null
+        return if (v.containsKey("pcactn_json")) Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2)
+        else Pca.verifyPcactn(v["pcactn"], grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2)
+    }
+
+    /** The pinned verdict text of one Intent Layer v2 primitive (reasons included). */
+    @Suppress("UNCHECKED_CAST")
+    fun intentPrimitive(kind: String, input: Any?): String = when (kind) {
+        "intent_schema" -> {
+            val inp = IntentJs.normalize(input) as Map<String, Any?>
+            val sig = ActionSchema.verify(inp["schema"], inp["keys"])
+            val c = ActionSchema.conform(inp["schema"], inp["verb"] as String, inp["params"])
+            "$sig|${if (sig == null) ActionSchema.digest(inp["schema"]) else ""}|${c.ok}|${c.code}|${c.path}|${c.reason}"
+        }
+        "intent_revocation" -> IntentRevocation.checkPrimitive(input).toString()
+        "intent_world" -> {
+            val r = OracleFacts.decideIntentWorld(input)
+            "${r.ok}|${r.reason}|" + (if (r.ok) Json.canonicalize(r.world) + "|" + r.singleSource else "")
+        }
+        "intent_provenance" -> {
+            val r = ParamProvenance.decide(input)
+            "${r.outcome}|${r.reason}|${r.friction}|${Json.canonicalize(r.labels)}|${Json.canonicalize(r.classes)}|${Json.canonicalize(r.env)}"
+        }
+        "intent_wb_active" -> IntentWB.active(input).toList().toString()
+        "intent_read_purpose" -> ParamProvenance.decideReadPurpose(input).let { "${it.outcome}|${it.minimise}|${it.uncovered}" }
+        "intent_map_commit" -> IntentMap.commitLeaves((input as Map<String, Any?>)["leaves"])
+        "intent_map" -> {
+            val d = IntentMap.decidePrimitive(input)
+            "${d.ok}|${d.reason}|" + (if (d.ok) "${d.cell}|${d.pPpm}|${d.residualRiskPpm}" else "")
+        }
+        else -> {
+            val r = IntentClassifier.decide(input)
+            "${r.ok}|${r.reason}|" + (if (r.ok) Json.canonicalize(r.classes) else "")
+        }
     }
 
     private fun guard(f: () -> String): String = try { f() } catch (t: Throwable) { "THROW:${t.javaClass.simpleName}:${esc(t.message)}" }
@@ -80,6 +114,13 @@ object ReasonSnapshot {
                 val s = guard { Json.canonicalizeStrict(value) + "|" + Pca.hashStrict(value) }
                 val l = guard { Json.canonicalize(value) + "|" + Pca.hashCanonical(value) }
                 out["$tag:cn:$n"] = esc(s) + "|" + esc(l)
+            }
+            // Intent Layer v2 primitives: the verdict with its reason (rules 13 step 7, 14, 16, 17, 18)
+            for (kind in listOf("intent_schema", "intent_revocation", "intent_world", "intent_provenance", "intent_classifier", "intent_wb_active", "intent_map_commit", "intent_map", "intent_read_purpose")) {
+                (prim[kind] as? List<Any?>)?.forEach { x ->
+                    val e = x as Map<String, Any?>
+                    out["$tag:iv2:$kind:${e["name"]}"] = esc(guard { intentPrimitive(kind, (e["input_json"] as? String)?.let { Json.parseLenient(it) } ?: e["input"]) })
+                }
             }
             (prim["b64u"] as? List<Any?>)?.forEachIndexed { n, x ->
                 val b = x as Map<String, Any?>
@@ -125,7 +166,10 @@ object ReasonSnapshot {
                 v = guard {
                     val allowed = (c["allowed_suites"] as? List<*>)?.map { it.toString() }
                     val grant = Json.parseLenient(c["grant"] as String) as Map<String, Any?>
-                    fmt(Pca.verifyPcactnJson(raw, grant, Json.asLong(c["now"]), Pca.Audience.Of(c["aud"] as String), allowed))
+                    fmt(Pca.verifyPcactnJson(raw, grant, Json.asLong(c["now"]), Pca.Audience.Of(c["aud"] as String), allowed,
+                        if (c["intent_policy_json"] is String) Pca.IntentPolicy.fromJsonText(c["intent_policy_json"] as String)
+                        else Pca.IntentPolicy.fromJson(c["intent_policy"]),
+                        if (c.containsKey("intent_v2")) IntentV2.Context.fromJson(c["intent_v2"]) else null))
                 }
             } else {
                 v = parseOutcome(raw, false) + "|len=" + parseOutcome(raw, true)
