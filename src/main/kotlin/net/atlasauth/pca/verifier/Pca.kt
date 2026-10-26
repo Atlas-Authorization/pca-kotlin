@@ -10,7 +10,7 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519
  * Native Kotlin reference verifier for the CORE PCActn checks, wire format v2. Byte-matches `@atlasauth/pca`
  * (the TypeScript source of truth) and the sibling language verifiers (java-pca, go-pca, python-pca, ...).
  *
- * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter`, then
+ * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter_format`, then
  * `intent` when evaluated (Intent Layer M2, see [IntentPolicy]) (a wire failure is terminal). Requires BouncyCastle (`org.bouncycastle.math.ec.rfc8032.Ed25519`), which the
  * module already depends on for the step-up client.
  *
@@ -357,14 +357,14 @@ object Pca {
     fun paramsDigest(params: Any?): String =
         hashCanonical(params ?: LinkedHashMap<String, Any?>())
 
-    private fun conditionsDigest(pre: Any?, post: Any?): String {
+    @JvmName("conditionsDigest") internal fun conditionsDigest(pre: Any?, post: Any?): String {
         val m = LinkedHashMap<String, Any?>()
         m["pre"] = pre
         m["post"] = post
         return hashCanonical(m)
     }
 
-    private fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
+    @JvmName("planLeaf") internal fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
         if (nodeId == null) throw IllegalArgumentException("missing node_id")
         val pd = action["params_digest"] ?: paramsDigest(null)
         val rc = action["reversibility_class"] ?: DEFAULT_REV
@@ -823,7 +823,7 @@ object Pca {
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
-     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter, then `intent` iff the PCActn carries
+     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter_format, then `intent` iff the PCActn carries
      * `intent` or [intentPolicy] is active (Intent Layer M2; absent both, the verdict is the pre-M2 one), then the Intent
      * Layer v2 checks `schema`, `intent_session`, `layers`, `accumulators`, `facts`, `provenance`, `classes` exactly when
      * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before).
@@ -925,8 +925,8 @@ object Pca {
             else v.fail("leaf_signature", "signature does not verify under the leaf holder key")
 
             // counter
-            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter"] = true
-            else v.fail("counter", "missing or not a non-negative safe integer")
+            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter_format"] = true
+            else v.fail("counter_format", "missing or not a non-negative safe integer")
 
             // Intent Layer M2: `intent` (reported iff the PCActn carries intent or the policy is active)
             val session = if (p.containsKey("intent_session")) asMap(p["intent_session"])["session"] else null
@@ -940,7 +940,7 @@ object Pca {
         }
         // any check not reached (internal error) is a failure; keep normative key order
         val ordered = LinkedHashMap<String, Boolean>()
-        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"))
+        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"))
             ordered[k] = v.checks[k] == true
         if (intentReported) ordered["intent"] = v.checks["intent"] == true
         // Intent Layer v2 (rules 13-18): reported in pipeline order exactly when IntentV2 reports them (total: never throws)

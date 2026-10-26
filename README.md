@@ -81,6 +81,17 @@ are Ed25519. The key is therefore a **software key**: the seed is encrypted at r
 key in the Android Keystore (hardware-backed where available) but is **not hardware-bound** and sits in
 process memory when used. Gate `approve` behind a BiometricPrompt for user presence.
 
+## What a passing result does not cover
+
+`counter: pass` is a format check (a non-negative integer); it does **not** mean the action was not replayed.
+Verification is stateless and this package has no replay store, so the resource server must persist, per grant and
+agent, the last accepted counter and refuse anything not strictly greater, atomically across all of its processes.
+
+The verifier is the core verifier only (this package has no HTTP middleware). It does not check replay, revocation, caveats, envelope predicates, plan authorization, risk or
+thresholds, and it does not compare the request body with the signed `params_digest`. Do those checks in your
+handler (the caveat helpers, the params digest of the body you will execute, your replay and revocation stores), or
+delegate the decision to a full verifier such as `requirePCA` from `@atlasauth/pca`.
+
 ## Conformance
 
 The repo ships a vendored copy of the shared **conformance corpus** (`conformance/vectors.json` +
