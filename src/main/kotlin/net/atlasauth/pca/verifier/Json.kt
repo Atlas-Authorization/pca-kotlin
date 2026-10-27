@@ -288,14 +288,30 @@ object Json {
 
     /** Bytewise UTF-8 comparison of two strings (== Unicode code point order). */
     fun compareUtf8(a: String, b: String): Int {
-        val ba = a.toByteArray(StandardCharsets.UTF_8)
-        val bb = b.toByteArray(StandardCharsets.UTF_8)
+        if (a == b) return 0
+        // TS encodes each lone surrogate as U+FFFD (Java's encoder writes '?')
+        val ba = loneToFffd(a).toByteArray(StandardCharsets.UTF_8)
+        val bb = loneToFffd(b).toByteArray(StandardCharsets.UTF_8)
         val n = minOf(ba.size, bb.size)
         for (k in 0 until n) {
             val d = (ba[k].toInt() and 0xff) - (bb[k].toInt() and 0xff)
             if (d != 0) return d
         }
-        return ba.size - bb.size
+        if (ba.size != bb.size) return ba.size - bb.size
+        return a.compareTo(b) // equal bytes: only lone surrogates; UTF-16 code-unit order as TS `a < b`
+    }
+
+    private fun loneToFffd(s: String): String {
+        if (!hasLoneSurrogate(s)) return s
+        val sb = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (Character.isHighSurrogate(c) && i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) { sb.append(c).append(s[i + 1]); i += 2; continue }
+            sb.append(if (Character.isSurrogate(c)) '\uFFFD' else c)
+            i++
+        }
+        return sb.toString()
     }
 
     private fun jsString(sb: StringBuilder, s: String, strict: Boolean) {
@@ -318,9 +334,9 @@ object Json {
                     } else if (Character.isHighSurrogate(c)) {
                         if (i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) {
                             sb.append(c).append(s[++i])
-                        } else sb.append('�')
+                        } else sb.append("\\u").append(String.format("%04x", c.code)) // JSON.stringify: lone surrogate -> \udXXX
                     } else if (Character.isLowSurrogate(c)) {
-                        sb.append('�') // lenient only (strict rejected above)
+                        sb.append("\\u").append(String.format("%04x", c.code)) // lenient only (strict rejected above)
                     } else sb.append(c)
                 }
             }
@@ -339,7 +355,31 @@ object Json {
         }
         if (f.isInfinite() || f.isNaN()) throw IllegalArgumentException("canonicalize: non-finite number")
         if (f == 0.0) return "0"
-        return BigDecimal(f.toString()).stripTrailingZeros().toPlainString()
+        return esNumber(f)
+    }
+
+    /** ECMAScript `Number::toString` (shortest round-trip digits; exponent form for n > 21 or n <= -6) of a finite non-zero double. */
+    fun esNumber(f: Double): String {
+        val exact = BigDecimal(Math.abs(f))
+        var r = exact
+        for (p in 1..17) {
+            r = exact.round(java.math.MathContext(p, java.math.RoundingMode.HALF_EVEN))
+            if (r.toDouble() == Math.abs(f)) break
+        }
+        val all = r.unscaledValue().toString()
+        val n = all.length - r.scale()
+        val d = all.trimEnd('0').ifEmpty { "0" }
+        val k = d.length
+        val body = when {
+            n in k..21 -> d + "0".repeat(n - k)
+            n in 1..21 -> d.substring(0, n) + "." + d.substring(n)
+            n > -6 && n <= 0 -> "0." + "0".repeat(-n) + d
+            else -> {
+                val e = n - 1
+                (if (k == 1) d else d.substring(0, 1) + "." + d.substring(1)) + "e" + (if (e < 0) "-" else "+") + Math.abs(e)
+            }
+        }
+        return if (f < 0) "-$body" else body
     }
 
     @Suppress("UNCHECKED_CAST")

@@ -22,7 +22,13 @@ android {
     }
     kotlinOptions { jvmTarget = "1.8" }
 
-    testOptions { unitTests { isReturnDefaultValues = true } }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+            // the attestation vector file (real vendor evidence) is large
+            all { it.maxHeapSize = "2g" }
+        }
+    }
 }
 
 dependencies {
@@ -35,6 +41,7 @@ dependencies {
     implementation(libs.bouncycastle)
 
     testImplementation(libs.junit)
+    testImplementation(libs.sqlite.jdbc) // the JDBC replay store's tests only
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
 }

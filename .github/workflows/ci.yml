@@ -26,8 +26,10 @@ jobs:
         task: [assembleRelease, testDebugUnitTest]
     steps:
       - uses: actions/checkout@v4
-      - name: Full adversarial corpus from the flagship
-        run: .github/scripts/fetch-flagship-corpus.sh
+      # --layout: the 0.5 parity tests (decision / model rules / escalation / passport / attestation / intent-state / ledger /
+      # optimistic / mesh / goal vectors) locate the shared corpus under packages/pca/conformance and packages/pca-conformance
+      - name: Full adversarial corpus + parity vectors from the flagship
+        run: .github/scripts/fetch-flagship-corpus.sh --layout
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -64,3 +66,31 @@ jobs:
       - name: Build + verifier tests + conformance corpus
         working-directory: ${{ env.PCA_MONO_SDK }}
         run: mvn -B -ntp test
+      # Native parity with the TypeScript reference (0.5). Every vector file must be present (a missing file FAILS, never skips); each
+      # step runs its tests on their own so a regression is visible as its own step. Already part of the step above.
+      - name: Parity vector files are present
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        shell: bash
+        run: |
+          for f in decision-vectors model-rules-vectors passport-vectors attestation-evidence-vectors intent-state-vectors ledger-vectors optimistic-vectors mesh-vectors canonical-number-vectors; do
+            test -s ../../packages/pca/conformance/$f.json || { echo "::error::packages/pca/conformance/$f.json is missing"; exit 1; }
+          done
+          test -s ../../packages/pca-conformance/vectors/goal/index.json || { echo "::error::goal vectors are missing"; exit 1; }
+      - name: Decision lattice, rules 20-21, signed escalation answers (every suite), authorize decision + escalation
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='DecisionVectorsTest,EscalationGuardTest'
+      - name: Canonical number/string forms (ES Number::toString, lone surrogates) and EC curves beyond SunEC (BouncyCastle)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='CanonicalVectorsTest,EcCurveTest'
+      - name: Model rules (rules 20-21 end to end through authorize, signed grants)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='ModelRulesTest'
+      - name: Signed passport + hardware attestation verifiers (SEV-SNP, TDX/DCAP, MAA, Confidential Space, NVIDIA) and strict X.509
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='PassportConformanceTest,AttestationVectorsTest,AttestationFailClosedTest'
+      - name: Track 3 vectors (intent-state, ledger, optimistic, mesh)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='IntentStateVectorsTest,ExtensionVectorsTest,MeshVectorsTest'
+      - name: Goal vectors
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='GoalVectorsTest'
