@@ -76,7 +76,7 @@ class PrincipalDeviceKey(private val store: SecretStore) {
         Base64Url.encode(Ed25519PrivateKeyParameters(seed, 0).generatePublicKey().encoded)
 }
 
-/** In-memory store, for tests and previews only. */
+/** In-memory store, for tests and demos only. */
 class InMemorySecretStore : SecretStore {
     @Volatile private var value: ByteArray? = null
     override fun load() = value?.copyOf()

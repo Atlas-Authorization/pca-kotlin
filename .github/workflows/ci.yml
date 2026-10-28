@@ -26,8 +26,10 @@ jobs:
         task: [assembleRelease, testDebugUnitTest]
     steps:
       - uses: actions/checkout@v4
-      - name: Full adversarial corpus from the flagship
-        run: .github/scripts/fetch-flagship-corpus.sh
+      # --layout: the 0.5 parity tests (decision / model rules / escalation / passport / attestation / intent-state / ledger /
+      # optimistic / mesh / goal vectors) locate the shared corpus under packages/pca/conformance and packages/pca-conformance
+      - name: Full adversarial corpus + parity vectors from the flagship
+        run: .github/scripts/fetch-flagship-corpus.sh --layout
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -64,3 +66,104 @@ jobs:
       - name: Build + verifier tests + conformance corpus
         working-directory: ${{ env.PCA_MONO_SDK }}
         run: mvn -B -ntp test
+      # Native parity with the TypeScript reference (0.5). Every vector file must be present (a missing file FAILS, never skips); each
+      # step runs its tests on their own so a regression is visible as its own step. Already part of the step above.
+      - name: Parity vector files are present
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        shell: bash
+        run: |
+          for f in decision-vectors model-rules-vectors passport-vectors attestation-evidence-vectors intent-state-vectors ledger-vectors optimistic-vectors mesh-vectors canonical-number-vectors goal-commit-vectors staleness-vectors operation-vectors plan-vectors assurance-vectors caveat-lang-vectors forbid-certificate-vectors policy-link-vectors k3-vectors fresh-at-vectors pca-grant-vectors blueprint-vectors a2a-vectors k4-vectors workflow-vectors readside-vectors vault-aggregate-vectors authorize-workflow-fixtures lease-vectors obligations-vectors break-glass-vectors missing-context-vectors policy-classes-vectors provenance-vectors sigstore-vectors; do
+            test -s ../../packages/pca/conformance/$f.json || { echo "::error::packages/pca/conformance/$f.json is missing"; exit 1; }
+          done
+          test -s ../../packages/pca-conformance/vectors/goal/index.json || { echo "::error::goal vectors are missing"; exit 1; }
+      - name: Decision lattice, rules 20-21, signed escalation answers (every suite), authorize decision + escalation
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='DecisionVectorsTest,EscalationGuardTest'
+      # Caveat language v2 (needs_discharge, sealed, narrow, max_uses, derive, spiffe_bound): the TypeScript reference's
+      # caveat-lang-vectors.json (all six primitives, reasons included) and the authorize wiring; a missing file FAILS, never skips
+      - name: Caveat language v2 vectors and authorize wiring
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        shell: bash
+        run: |
+          test -s ../../packages/pca/conformance/caveat-lang-vectors.json || { echo "::error::caveat-lang-vectors.json is missing"; exit 1; }
+          mvn -B -ntp test -Dtest='CaveatLangVectorsTest,CaveatLangAuthorizeTest'
+      # K5: workflow admission inside authorize (C-308) and the tokenisation vault + aggregate reads (C-315..C-319); a missing file FAILS, never skips
+      - name: K5 authorize workflow fixtures and vault / aggregate vectors
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        shell: bash
+        run: |
+          for f in authorize-workflow-fixtures vault-aggregate-vectors; do
+            test -s ../../packages/pca/conformance/$f.json || { echo "::error::$f.json is missing"; exit 1; }
+          done
+          mvn -B -ntp test -Dtest='K5AuthorizeWorkflowTest,K5VaultAggregateTest'
+      - name: Forbid-wins certificate and linked policy template vectors
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='PolicyAuthoringVectorsTest'
+      - name: Canonical number/string forms (ES Number::toString, lone surrogates) and EC curves beyond SunEC (BouncyCastle)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='CanonicalVectorsTest,EcCurveTest'
+      - name: Model rules (rules 20-21 end to end through authorize, signed grants)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='ModelRulesTest'
+      - name: Signed passport + hardware attestation verifiers (SEV-SNP, TDX/DCAP, MAA, Confidential Space, NVIDIA) and strict X.509
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='PassportConformanceTest,AttestationVectorsTest,AttestationFailClosedTest'
+      - name: Track 3 vectors (intent-state, ledger, optimistic, mesh)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='IntentStateVectorsTest,ExtensionVectorsTest,MeshVectorsTest'
+      - name: Goal vectors
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='GoalVectorsTest'
+      - name: Goal binding v3 (approved_goal, goal-commit vectors)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='GoalCommitV3Test'
+      - name: Revocation staleness (T9 vectors, per-class windows, signed epoch, authorize freshness check)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='RevocationStalenessTest'
+      - name: Operation records (T3 vectors, run-once concurrency on memory and SQLite, recovery, executor)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='OperationsTest'
+      - name: Plan lifecycle (T10 vectors in memory and on SQLite, TS root, single-winner transitions, authorize plans)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='PlanLifecycleTest'
+      - name: Assurance labels (T8/B7 vectors, requireAssurance gate before the replay claim)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='AssuranceVectorsTest'
+      - name: Store conformance helper (passes the shipped stores, fails racy / aliasing / non-atomic / loose-CAS ones)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp test -Dtest='StoreConformanceTest'
+      - name: actions-vectors (action kit, ActionDef parse, canonical digest, trait expansion, rule 22 floor check, pack proof, ActionSchema v2)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        shell: bash
+        run: |
+          test -n "$(ls ../../packages/pca-conformance/vectors/actions/*.json 2>/dev/null)" || { echo "::error::action-kit vectors are missing"; exit 1; }
+          mvn -B -ntp test -Dtest='ActionVectorsTest'
+
+  # The Ktor plugin and the Spring (servlet filter, interceptor, auto-configuration) integrations: separate pure-JVM Gradle modules,
+  # so the core library keeps no Ktor / Spring dependency. Each compiles the verifier from the shared source directory.
+  integrations:
+    name: Ktor + Spring integrations (guard semantics)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # the guard tests use grants and PCActns signed by the reference implementation (authorize + model-rules vectors, keys)
+      - name: Full adversarial corpus + parity vectors from the flagship
+        run: .github/scripts/fetch-flagship-corpus.sh --layout
+      - name: Shared vector files are present
+        shell: bash
+        run: |
+          for f in model-rules-vectors keys k3-vectors fresh-at-vectors pca-grant-vectors blueprint-vectors a2a-vectors k4-vectors workflow-vectors readside-vectors vault-aggregate-vectors authorize-workflow-fixtures lease-vectors obligations-vectors break-glass-vectors missing-context-vectors policy-classes-vectors provenance-vectors sigstore-vectors; do
+            test -s packages/pca/conformance/$f.json || test -s conformance/$f.json || { echo "::error::$f.json is missing"; exit 1; }
+          done
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Ktor plugin (no config 403 authorize_config, 401/403 split, replay, escalate, signed answer, signature-only opt-in, K5 workflow step)
+        run: gradle --no-daemon :pca-ktor:test
+      - name: Spring filter, interceptor and auto-configuration (same guard semantics, K5 workflow step)
+        run: gradle --no-daemon :pca-spring:test
