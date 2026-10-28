@@ -120,7 +120,7 @@ class IntentV2KillTest {
             "acc", jm("state", jm("trip_spend", jm("sum", 0L)), "monitors", jm())).also { it.putAll(jm(*over)) }
         fun verify(grant: Map<String, Any?>, p: Map<String, Any?>, ctx: Any?): Pca.Verdict =
             Pca.verifyPcactn(p, grant, NOW, Pca.Audience.Of(AUD), null, null, IntentV2.Context.fromJson(ctx))
-        val CORE = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter", "intent")
+        val CORE = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format", "intent")
         fun keys(vararg extra: String): List<String> = CORE + extra
         fun failed(v: Pca.Verdict): List<String> = v.checks.filter { !it.value }.keys.toList()
     }
