@@ -37,6 +37,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
+# Actions.kt and ActionSchema.kt (action kit) fall in the last ("rest") shard; ActionVectorsTest replays the shared vectors (flagship layout).
 env:
   CRATE: kotlin-pca
   SHARDS: '8'
@@ -54,7 +55,7 @@ jobs:
           - { shard: 1, classes: 'Pca' }
           - { shard: 2, classes: 'Pca$*' }
           - { shard: 3, classes: 'Json*,Threshold*' }
-          - { shard: 4, classes: 'Pq*,Caveats*' }
+          - { shard: 4, classes: 'Pq*,Caveats*,CaveatLang*' }
           - { shard: 5, classes: 'IntentV2*,IntentAcc*' }
           - { shard: 6, classes: 'IntentMap*,IntentSession*,IntentRevocation*,IntentJs*,IntentClassifier*,IntentWB*,IntentArtifacts*' }
           - { shard: 7, classes: 'SafeRegex*,Predicates*' }
@@ -111,7 +112,7 @@ jobs:
                     "SafeRegex*,Predicates*"]
           par = lambda xs: "".join(f"<param>{p}.{x}</param>" for x in xs)
           if c == "rest":
-              block = f"<targetClasses><param>{p}.*</param></targetClasses><excludedClasses>{par(','.join(shards).split(','))}</excludedClasses>"
+              block = f"<targetClasses><param>{p}.*</param><param>net.atlasauth.pca.stepup.*</param></targetClasses><excludedClasses>{par(','.join(shards).split(','))}</excludedClasses>"
           else:
               block = f"<targetClasses>{par(c.split(','))}</targetClasses>"
           s = open("pom.xml").read()

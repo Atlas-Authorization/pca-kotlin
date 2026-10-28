@@ -23,6 +23,20 @@ object IntentV2 {
         /** False for a PRESENT context that is not a JSON object (null included): every reportable v2 check fails. */
         internal val wellFormed: Boolean,
     ) {
+        /** A copy with `env` (the host's tighten-rule context members) replaced. */
+        fun withEnv(env: Any?): Context {
+            val m = LinkedHashMap(raw)
+            m["env"] = IntentJs.normalize(env)
+            return Context(m, wellFormed)
+        }
+
+        /** A copy without `env` (TypeScript `undefined`: an explicit null env with no host env is absent, not malformed). */
+        fun withoutEnv(): Context {
+            val m = LinkedHashMap(raw)
+            m.remove("env")
+            return Context(m, wellFormed)
+        }
+
         /** A copy with `params` replaced (a host supplying the plaintext params it parsed from the request). */
         fun withParams(params: Any?): Context {
             val m = LinkedHashMap(raw)
@@ -65,6 +79,12 @@ object IntentV2 {
     class Decision {
         val checks: MutableList<Check> = ArrayList()
         val env: MutableMap<String, Any?> = LinkedHashMap()
+
+        /** Worlds decided by a single oracle (their `env.world.<name>` is model-derived, rule 21). */
+        var singleSource: List<String> = emptyList()
+
+        /** Rule 21 compatibility mode in effect (a grant reads model-derived paths under `legacy`): report the verdict degraded. */
+        var legacyModelPolarity: Boolean = false
     }
 
     /** True iff any v2 check would be reported (a malformed present context fails closed, so it counts). */
@@ -93,7 +113,8 @@ object IntentV2 {
         if (!optMap(c, "policy")) return "policy must be an object"
         if (c.containsKey("policy")) {
             val pr = IntentJs.obj(c["policy"])
-            for (k in pr.keys) if (k != "session" && k != "schema" && k != "acc" && k != "map") return "policy: unknown member '$k'"
+            for (k in pr.keys) if (k != "session" && k != "schema" && k != "acc" && k != "map" && k != "model_polarity") return "policy: unknown member '$k'"
+            if (pr.containsKey("model_polarity") && pr["model_polarity"] != "strict" && pr["model_polarity"] != "legacy") return "policy.model_polarity must be 'strict' or 'legacy'"
             if (!optMap(pr, "session")) return "policy.session must be an object"
             if (pr.containsKey("session")) {
                 val o = IntentJs.obj(pr["session"])
@@ -123,6 +144,7 @@ object IntentV2 {
             }
         }
         if (!optMap(c, "params")) return "params must be an object"
+        if (!optMap(c, "env")) return "env must be an object"
         for (k in listOf("schema", "session", "acc")) if (!optMap(c, k)) return "$k must be an object"
         if (!optMap(c, "map")) return "map must be an object"
         if (c.containsKey("map")) for (k in IntentJs.obj(c["map"]).keys) if (k != "disclosure") return "map: unknown member '$k'"
@@ -462,11 +484,15 @@ object IntentV2 {
             if (present && mapCommitted(p)) out.checks.add(Check("map", false, "malformed v2 context: $ctxErr"))
             return out
         }
+        var matchedDoc: Any? = null
         if (present || closedWorld(ctx)) {
             run(out, "schema", clockOk) {
                 val matched = Matched()
                 val why = schemaStep(p, ctx, matched)
-                if (why == null) out.env["canon"] = ActionSchema.canonProjection(matched.doc, verbOf(p), IntentJs.obj(ctx!!.get("params")))
+                if (why == null) {
+                    matchedDoc = matched.doc
+                    out.env["canon"] = ActionSchema.canonProjection(matched.doc, verbOf(p), IntentJs.obj(ctx!!.get("params")))
+                }
                 why
             }
         }
@@ -524,11 +550,85 @@ object IntentV2 {
                     wb.prov?.let { out.env["prov"] = it }
                     wb.cls?.let { out.env["class"] = it }
                 }
+                wb.singleSource?.let { if (it.isNotEmpty()) out.singleSource = ArrayList(it) }
             }
         } else if (mapActive) {
             run(out, "map", clockOk) { mapStep(p, ctx) }
         }
+        modelRules(p, grant, ctx, out, clockOk, action, matchedDoc)
         return out
+    }
+
+    /** The predicate lists a model-derived path could widen: the grant's allow-list and the ceilings (V5 layers). */
+    private fun allowSidePredicates(env: Map<String, Any?>?, ctx: Context?): List<Any?> {
+        val lists = ArrayList<Any?>()
+        lists.add(env?.get("predicates"))
+        val layers = ctx?.get("layers")
+        if (layers is Map<*, *>) for (k in listOf("org", "site", "std")) lists.add(IntentJs.get(layers[k], "predicates"))
+        return lists
+    }
+
+    /**
+     * Rules 20 and 21, evaluated last (after `classes`, so the verifier-computed `env` is complete). Both read the signed
+     * ENVELOPE of the stored grant. `units` (20): reported iff `envelope.units` is present. `tighten` (21): reported iff
+     * `envelope.tighten` or a `model_polarity` (envelope or policy) is present, or a grant-side `where` reads a model-derived
+     * env path (refused, never silently skipped). A PCActn with none of these verifies as before.
+     */
+    private fun modelRules(
+        p: Map<String, Any?>, grant: Map<String, Any?>?, ctx: Context?, out: Decision, clockOk: Boolean,
+        action: Map<String, Any?>, schemaDoc: Any?,
+    ) {
+        val env = Authorize.readEnvelope(grant)
+        val preds = allowSidePredicates(env, ctx)
+        val verb = verbOf(p)
+        if (env != null && env.containsKey("units")) {
+            run(out, "units", clockOk) {
+                var doc: Any? = schemaDoc
+                var why: String? = null
+                if (doc == null) {
+                    val m = Matched()
+                    why = schemaStep(p, ctx, m)
+                    doc = m.doc
+                }
+                if (why != null) why
+                else {
+                    val v = ActionSchema.schemaVerb(doc, verb)
+                    val inp = LinkedHashMap<String, Any?>()
+                    inp["units"] = env["units"]
+                    if (IntentJs.own(doc, "units")) inp["schema_units"] = IntentJs.get(doc, "units")
+                    if (v != null && v.containsKey("params")) inp["verb_params"] = v["params"]
+                    inp["verb"] = verb
+                    inp["predicates"] = preds
+                    val d = PcaDecision.decideUnits(inp)
+                    if (d.ok) null else d.reason
+                }
+            }
+        }
+        val polIn = ctx != null && ctx.has("policy", "model_polarity")
+        var hasPol = false
+        var pol: Any? = null
+        if (polIn) {
+            val pv = ctx!!.get("policy", "model_polarity")
+            if (pv != "strict") { hasPol = true; pol = pv }
+        } else if (env != null && env.containsKey("model_polarity")) { hasPol = true; pol = env["model_polarity"] }
+        val single = out.singleSource
+        if ((env != null && env.containsKey("tighten")) || hasPol || polIn || PcaDecision.modelPathsRead(preds, single).isNotEmpty()) {
+            run(out, "tighten", clockOk) {
+                val inp = LinkedHashMap<String, Any?>()
+                inp["predicates"] = preds
+                if (env != null && env.containsKey("tighten")) inp["tighten"] = env["tighten"]
+                if (hasPol) inp["polarity"] = pol
+                inp["single_source"] = single
+                val merged = LinkedHashMap<String, Any?>()
+                val hostEnv = ctx?.get("env")
+                if (hostEnv is Map<*, *>) for ((k, v) in hostEnv) merged[k as String] = v
+                merged.putAll(out.env)
+                inp["context"] = linkedMapOf("action" to action, "env" to merged)
+                val r = PcaDecision.decideTighten(inp)
+                if (r.legacy) out.legacyModelPolarity = true
+                if (r.outcome == "ok") null else (r.reason ?: "refused")
+            }
+        }
     }
 
     /**
