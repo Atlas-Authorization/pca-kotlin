@@ -22,12 +22,26 @@ object ActionSchema {
     internal val SENSITIVITIES = listOf("free", "material", "critical")
     internal val SCHEMA_REVERSIBILITY = listOf("reversible", "rate_limited", "irreversible")
     internal val PARAM_TYPES = listOf("string", "integer", "boolean", "date", "set", "array")
+    internal val PARAM_TYPES_V2 = PARAM_TYPES + listOf("datetime", "duration", "object_ref")
+    internal val SCHEMA_V2_EFFECTS = listOf("read", "create", "update", "delete", "send", "pay", "exec", "privilege", "export", "publish", "provision", "sign")
+    internal val SCHEMA_V2_CAVEATS = listOf("amount_cap", "count_cap", "window", "resource_scope", "recipient_scope", "approval_ref", "short_expiry", "rate_cap")
+    internal val SCHEMA_V2_PRULES = listOf("array_bounded", "export_bounded", "id_not_wildcard", "money_amount_bounded", "money_has_currency", "pay_has_idempotency", "recipient_param_declared", "secret_not_logged")
+    internal val SCHEMA_V2_CONTEXT = listOf("approval_ref", "dry_run_first", "fresh_revocation", "idempotency", "revocable", "sandbox_attested")
+    internal val SCHEMA_V2_TAGS = listOf("pii", "phi", "pci", "secret", "credential", "free_text_outbound", "code", "path", "sql")
+    internal val SCHEMA_V2_PROVENANCE = listOf("first_party", "tool", "agent")
+    internal val PARAM_PATH_RE_V2 = Regex("action\\.params\\.[A-Za-z0-9_]{1,64}(?:\\.[A-Za-z0-9_]{1,64}){0,2}")
+    private val TRAIT_ID_RE = Regex("[a-z][a-z0-9_]{0,31}\\.[a-z][a-z0-9_]{0,63}")
+    private val TAINT_CTX_RE = Regex("session_taint_max:[a-z_]{1,16}")
+    private val DATETIME_RE = Regex("([0-9]{4}-[0-9]{2}-[0-9]{2})T([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])(?:\\.[0-9]{1,3})?Z")
     private val DOC_KEYS = listOf("v", "kind", "site", "aud", "version", "units", "state", "verbs", "sig")
     private val VERB_KEYS = listOf("verb", "kind", "params", "reversibility", "reversibility_by", "mcp", "openapi", "harm", "world", "effects", "returns", "description")
     private val PARAM_KEYS = listOf(
         "type", "semantic", "sensitivity", "required", "values", "min", "max", "unit", "max_len", "items",
         "min_items", "max_items", "default", "principal_neutral_default", "accumulates_into", "issued_by_site", "description",
     )
+    private val DOC_KEYS_V2 = DOC_KEYS + listOf("traits_digest", "trait_defs", "pack")
+    private val VERB_KEYS_V2 = VERB_KEYS + listOf("traits", "def", "floors", "confirmation")
+    private val PARAM_KEYS_V2 = PARAM_KEYS + listOf("role", "format", "tags", "provenance_min")
     private val SIG_KEYS = listOf("alg", "kid", "value", "pq_value")
 
     /** A conformance verdict: `ok`, else the violation `code` (and `path` for a parameter). */
@@ -43,14 +57,14 @@ object ActionSchema {
     private fun isIn(xs: List<String>, v: Any?): Boolean = v is String && v in xs
     private fun distinct(xs: List<*>): Boolean = HashSet<Any?>(xs).size == xs.size
 
-    private fun paramDeclError(path: String, dO: Any?, units: Any?): String? {
-        if (!PARAM_PATH_RE.matches(path)) return "parameter path '$path' is not action.params.<name>"
-        if (path.substring("action.params.".length) in RESERVED_NAMES) return "parameter name '$path' is reserved (__proto__ / constructor / prototype)"
+    private fun paramDeclError(path: String, dO: Any?, units: Any?, v2: Boolean = false): String? {
+        if (!(if (v2) PARAM_PATH_RE_V2 else PARAM_PATH_RE).matches(path)) return "parameter path '$path' is not action.params.<name>"
+        if (path.substring("action.params.".length).split(".").any { it in RESERVED_NAMES }) return "parameter name '$path' is reserved (__proto__ / constructor / prototype)"
         if (dO !is Map<*, *>) return "$path: declaration must be an object"
         val d = IntentJs.obj(dO)
-        for (k in d.keys) if (k !in PARAM_KEYS) return "$path: unknown member '$k'"
+        for (k in d.keys) if (k !in (if (v2) PARAM_KEYS_V2 else PARAM_KEYS)) return "$path: unknown member '$k'"
         val type = d["type"]
-        if (!isIn(PARAM_TYPES, type)) return "$path: unknown type"
+        if (!isIn(if (v2) PARAM_TYPES_V2 else PARAM_TYPES, type)) return "$path: unknown type"
         if (!isStr(d["semantic"], 128)) return "$path: semantic must be a non-empty string"
         if (!isIn(SENSITIVITIES, d["sensitivity"])) return "$path: unknown sensitivity"
         if (d.containsKey("required") && d["required"] !is Boolean) return "$path: required must be a boolean"
@@ -64,7 +78,7 @@ object ActionSchema {
         if ("set" == type && !d.containsKey("values")) return "$path: a set needs values"
         val intItems = "array" == type && "integer" == d["items"]
         for (k in listOf("min", "max")) {
-            if (d.containsKey(k) && (!IntentJs.isInt(d[k]) || ("integer" != type && !intItems))) return "$path: $k must be a safe integer on an integer parameter"
+            if (d.containsKey(k) && (!IntentJs.isInt(d[k]) || ("integer" != type && !(v2 && "duration" == type) && !intItems))) return "$path: $k must be a safe integer on an integer parameter"
         }
         if (IntentJs.isInt(d["min"]) && IntentJs.isInt(d["max"]) && IntentJs.num(d["min"])!! > IntentJs.num(d["max"])!!) return "$path: min > max"
         if (d.containsKey("unit") && ("integer" != type || d["unit"] !is String || units !is Map<*, *> || !units.containsKey(d["unit"])))
@@ -87,7 +101,101 @@ object ActionSchema {
         }
         if (d.containsKey("issued_by_site") && d["issued_by_site"] !is Boolean) return "$path: issued_by_site must be a boolean"
         if (d.containsKey("description") && !isStr(d["description"], 1024)) return "$path: description must be a string"
+        if (v2) {
+            if (d.containsKey("role") && !isStr(d["role"], 128)) return "$path: role must be a non-empty string"
+            if (d.containsKey("format") && (d["format"] !is String || formatCheck(d["format"] as String) == null || ("string" != type && "object_ref" != type)))
+                return "$path: format must be a known format on a string parameter"
+            if (d.containsKey("tags")) {
+                val tg = d["tags"]
+                if (tg !is List<*> || tg.size > SCHEMA_V2_TAGS.size || !distinct(tg) || !tg.all { isIn(SCHEMA_V2_TAGS, it) }) return "$path: tags must be distinct known tags"
+            }
+            if (d.containsKey("provenance_min") && !isIn(SCHEMA_V2_PROVENANCE, d["provenance_min"])) return "$path: unknown provenance_min"
+        }
         return null
+    }
+
+    /** Null if `f` is a well-formed materialized profile (shape only; the semantic check is rule 22). */
+    internal fun schemaFloorsError(f: Any?): String? {
+        if (f !is Map<*, *>) return "floors must be an object"
+        for (k in f.keys) if (k !in listOf("risk", "rev", "blast_ppm", "esc", "caveats", "context", "prules")) return "floors: unknown member '$k'"
+        fun rng(x: Any?, lo: Long, hi: Long) = IntentJs.isInt(x) && IntentJs.num(x)!! >= lo && IntentJs.num(x)!! <= hi
+        if (!rng(f["risk"], 0, 3) || !rng(f["esc"], 0, 3)) return "floors.risk and floors.esc must be integers in 0..3"
+        if (!isIn(SCHEMA_REVERSIBILITY, f["rev"])) return "floors.rev is not a reversibility class"
+        if (!rng(f["blast_ppm"], 0, 1000000)) return "floors.blast_ppm must be an integer in 0..1000000"
+        for (name in listOf("caveats", "context", "prules")) {
+            val a = f[name]
+            val ok: (String) -> Boolean = when (name) {
+                "caveats" -> ({ x: String -> x in SCHEMA_V2_CAVEATS })
+                "context" -> ({ x: String -> x in SCHEMA_V2_CONTEXT || TAINT_CTX_RE.matches(x) })
+                else -> ({ x: String -> x in SCHEMA_V2_PRULES })
+            }
+            if (a !is List<*> || a.size > 64 || !a.all { it is String && ok(it) }) return "floors.$name must be an array of known entries"
+            for (i in 1 until a.size) if (!((a[i - 1] as String) < (a[i] as String))) return "floors.$name must be sorted and distinct"
+        }
+        return null
+    }
+
+    // ---- v2 string formats (syntactic checks, identical in every language) ----
+    // ECMAScript \s, spelled out (java's \s is narrower)
+    private const val JS_WS = "\\t\\n\\u000B\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"
+    private val EMAIL_RE = Regex("[A-Za-z0-9._%+\\-]{1,64}@[A-Za-z0-9\\-]{1,63}(?:\\.[A-Za-z0-9\\-]{1,63})+")
+    private val URL_RE = Regex("[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^$JS_WS/?#]+[^$JS_WS]*")
+    private val URI_HTTPS_RE = Regex("https://[^$JS_WS/?#]+[^$JS_WS]*")
+    private val UUID_RE = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+    private val PHONE_RE = Regex("\\+[1-9][0-9]{6,14}")
+    private val COUNTRY_RE = Regex("[A-Z]{2}")
+    private val CURRENCY_RE = Regex("[A-Z]{3}")
+    private val SEMVER_RE = Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z\\-]+(?:\\.[0-9A-Za-z\\-]+)*)?(?:\\+[0-9A-Za-z\\-]+(?:\\.[0-9A-Za-z\\-]+)*)?")
+    private val SHA256_RE = Regex("[0-9a-f]{64}")
+    private val IBAN_RE = Regex("[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}")
+    private val CIDR4_RE = Regex("([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})/([0-9]{1,2})")
+    private val CIDR6_RE = Regex("([0-9a-fA-F:]{2,39})/([0-9]{1,3})")
+    private val ID_FORMAT_RE = Regex("id:[a-z0-9_]+(?:\\.[a-z0-9_]+){0,3}")
+    private val ID_VALUE_RE = Regex("[A-Za-z0-9._:\\-]{1,128}")
+
+    private fun canonDec(n: String): Boolean = n.toInt().toString() == n
+
+    private fun ibanOk(s: String): Boolean {
+        if (!IBAN_RE.matches(s)) return false
+        var rem = 0
+        for (ch in s.substring(4) + s.substring(0, 4)) {
+            val v = if (ch >= 'A') ch.code - 55 else ch.code - 48
+            rem = (if (v > 9) rem * 100 + v else rem * 10 + v) % 97
+        }
+        return rem == 1
+    }
+
+    private fun cidrOk(s: String): Boolean {
+        val m4 = CIDR4_RE.matchEntire(s)
+        if (m4 != null) {
+            val g = m4.groupValues
+            return (1..4).all { g[it].toInt() <= 255 && canonDec(g[it]) } && g[5].toInt() <= 32 && canonDec(g[5])
+        }
+        val m6 = CIDR6_RE.matchEntire(s) ?: return false
+        val a = m6.groupValues[1]
+        return a.count { it == ':' } >= 2 && !a.contains(":::") && m6.groupValues[2].toInt() <= 128 && canonDec(m6.groupValues[2])
+    }
+
+    /** The checker of a v2 `format`, or null when the format is unknown. `id:<type>` accepts a 1..128 character safe id. */
+    internal fun formatCheck(f: String): ((String) -> Boolean)? = when (f) {
+        "email" -> ({ s: String -> s.length <= 254 && EMAIL_RE.matches(s) })
+        "url" -> ({ s: String -> URL_RE.matches(s) })
+        "uri_https" -> ({ s: String -> URI_HTTPS_RE.matches(s) })
+        "uuid" -> ({ s: String -> UUID_RE.matches(s) })
+        "iban" -> ({ s: String -> ibanOk(s) })
+        "phone_e164" -> ({ s: String -> PHONE_RE.matches(s) })
+        "cidr" -> ({ s: String -> cidrOk(s) })
+        "iso_country" -> ({ s: String -> COUNTRY_RE.matches(s) })
+        "iso_currency" -> ({ s: String -> CURRENCY_RE.matches(s) })
+        "semver" -> ({ s: String -> SEMVER_RE.matches(s) })
+        "sha256" -> ({ s: String -> SHA256_RE.matches(s) })
+        else -> if (ID_FORMAT_RE.matches(f)) ({ s: String -> ID_VALUE_RE.matches(s) }) else null
+    }
+
+    private fun formatViolation(d: Map<String, Any?>, x: String): Pair<String, String>? {
+        if (!d.containsKey("format")) return null
+        val ck = formatCheck(d["format"] as String)
+        return if (ck == null || !ck(x)) "out_of_domain" to "not a valid ${d["format"]}" else null
     }
 
     private fun exactKeys(o: Any?, vararg keys: String): Boolean {
@@ -96,10 +204,30 @@ object ActionSchema {
         return keys.all { o.containsKey(it) }
     }
 
-    private fun verbDeclError(vO: Any?, units: Any?): String? {
+    /** Null if `c` is a well-formed `confirmation` (shape only; the signature check is rule 22). */
+    internal fun confirmationShapeError(c: Any?): String? {
+        if (c !is Map<*, *>) return "confirmation must be an object"
+        for (k in c.keys) if (k !in listOf("def_digest", "traits_digest", "facts_digest", "final_traits", "dismissed", "reviewer_kid", "ts", "sig")) return "confirmation: unknown member '$k'"
+        if (Pca.decodeB64uStrict(c["def_digest"], 32) == null || Pca.decodeB64uStrict(c["traits_digest"], 32) == null || Pca.decodeB64uStrict(c["facts_digest"], 32) == null) return "confirmation: def_digest, traits_digest and facts_digest must be canonical base64url SHA-256 digests"
+        if (Pca.decodeB64uStrict(c["sig"], 64) == null) return "confirmation: sig must be a canonical base64url 64-byte signature"
+        val ft = c["final_traits"]
+        if (ft !is List<*> || ft.size > 64 || !ft.all { it is String && TRAIT_ID_RE.matches(it) }) return "confirmation: final_traits must be trait ids"
+        for (i in 1 until ft.size) if (!((ft[i - 1] as String) < (ft[i] as String))) return "confirmation: final_traits must be sorted and distinct"
+        val dm = c["dismissed"]
+        if (dm !is List<*> || dm.size > 64) return "confirmation: dismissed must be an array"
+        for (d in dm) {
+            if (d !is Map<*, *> || d.keys.any { it != "trait" && it != "reason" } || d["trait"] !is String || !TRAIT_ID_RE.matches(d["trait"] as String) || !isStr(d["reason"], 256))
+                return "confirmation: dismissed entries must be {trait, reason}"
+        }
+        if (!isStr(c["reviewer_kid"], 128)) return "confirmation: reviewer_kid must be a non-empty string"
+        if (!IntentJs.isNonNeg(c["ts"])) return "confirmation: ts must be a non-negative safe integer"
+        return null
+    }
+
+    private fun verbDeclError(vO: Any?, units: Any?, v2: Boolean = false): String? {
         if (vO !is Map<*, *>) return "verb entry must be an object"
         val v = IntentJs.obj(vO)
-        for (k in v.keys) if (k !in VERB_KEYS) return "verb entry: unknown member '$k'"
+        for (k in v.keys) if (k !in (if (v2) VERB_KEYS_V2 else VERB_KEYS)) return "verb entry: unknown member '$k'"
         if (!isStr(v["verb"], 128)) return "verb entry: verb must be a non-empty string"
         val at = "verb '${v["verb"]}'"
         if ("read" != v["kind"] && "write" != v["kind"]) return "$at: kind must be read or write"
@@ -107,9 +235,10 @@ object ActionSchema {
         val params = IntentJs.obj(v["params"])
         if (params.size > MAX_SCHEMA_PARAMS) return "$at: more than $MAX_SCHEMA_PARAMS parameters"
         for ((k, d) in params) {
-            val err = paramDeclError(k, d, units)
+            val err = paramDeclError(k, d, units, v2)
             if (err != null) return "$at: $err"
         }
+        if (v2) for (p in params.keys) for (q in params.keys) if (q != p && q.startsWith("$p.")) return "$at: parameter '$p' is both a value and the parent of '$q'"
         if (v.containsKey("reversibility") && !isIn(SCHEMA_REVERSIBILITY, v["reversibility"])) return "$at: unknown reversibility"
         if (v.containsKey("reversibility_by")) {
             val rO = v["reversibility_by"]
@@ -124,19 +253,33 @@ object ActionSchema {
         }
         if (v.containsKey("mcp") && (!exactKeys(v["mcp"], "tool") || !isStr(IntentJs.get(v["mcp"], "tool"), 128))) return "$at: mcp must be {tool}"
         if (v.containsKey("openapi") && (!exactKeys(v["openapi"], "operationId") || !isStr(IntentJs.get(v["openapi"], "operationId"), 128))) return "$at: openapi must be {operationId}"
-        for (k in listOf("harm", "effects", "returns")) if (v.containsKey(k) && v[k] !is Map<*, *>) return "$at: $k must be an object"
+        for (k in if (v2) listOf("harm", "returns") else listOf("harm", "effects", "returns")) if (v.containsKey(k) && v[k] !is Map<*, *>) return "$at: $k must be an object"
+        if (v2) {
+            val ef = v["effects"]
+            if (ef !is List<*> || ef.isEmpty() || ef.size > SCHEMA_V2_EFFECTS.size || !ef.all { isIn(SCHEMA_V2_EFFECTS, it) }) return "$at: effects must be 1..${SCHEMA_V2_EFFECTS.size} known effects"
+            for (i in 1 until ef.size) if (!((ef[i - 1] as String) < (ef[i] as String))) return "$at: effects must be sorted and distinct"
+            if (("read" == v["kind"]) != ef.all { it == "read" }) return "$at: kind read must hold exactly when every effect is read"
+            val tr = v["traits"]
+            if (tr !is List<*> || tr.size > 64 || !tr.all { it is String && TRAIT_ID_RE.matches(it) }) return "$at: traits must be trait ids"
+            for (i in 1 until tr.size) if (!((tr[i - 1] as String) < (tr[i] as String))) return "$at: traits must be sorted and distinct"
+            if (Pca.decodeB64uStrict(v["def"], 32) == null) return "$at: def must be a canonical base64url SHA-256 digest"
+            val fe = schemaFloorsError(v["floors"])
+            if (fe != null) return "$at: $fe"
+            if (v.containsKey("confirmation")) confirmationShapeError(v["confirmation"])?.let { return "$at: $it" }
+        }
         if (v.containsKey("world") && v["world"] !is List<*>) return "$at: world must be an array"
         if (v.containsKey("description") && !isStr(v["description"], 1024)) return "$at: description must be a string"
         return null
     }
 
-    /** Structural validation of a signed schema. Null = well-formed. Never throws. */
-    fun shapeError(docO: Any?): String? {
+    /** Structural validation of a schema (`signed` = it carries `sig`; an unsigned one must not). Null = well-formed. Never throws. */
+    fun shapeError(docO: Any?, signed: Boolean = true): String? {
         try {
             if (docO !is Map<*, *>) return "schema is not an object"
             val doc = IntentJs.obj(docO)
-            for (k in doc.keys) if (k !in DOC_KEYS) return "unknown member '$k'"
-            if (!OracleFacts.isOne(doc["v"])) return "unsupported schema version"
+            val v2 = (doc["v"] is Json.Num || doc["v"] is Int || doc["v"] is Long) && IntentJs.num(doc["v"]) == 2.0
+            for (k in doc.keys) if (k !in (if (v2) DOC_KEYS_V2 else DOC_KEYS)) return "unknown member '$k'"
+            if (!OracleFacts.isOne(doc["v"]) && !v2) return "unsupported schema version"
             if (ACTION_SCHEMA_KIND != doc["kind"]) return "kind must be '$ACTION_SCHEMA_KIND'"
             if (!isStr(doc["site"], 2048) || !isStr(doc["aud"], 256) || !isStr(doc["version"], 128)) return "site, aud and version must be non-empty strings"
             if (doc.containsKey("units")) {
@@ -151,24 +294,38 @@ object ActionSchema {
                 }
             }
             if (doc.containsKey("state") && doc["state"] !is List<*>) return "state must be an array"
+            if (v2) {
+                if (doc.containsKey("traits_digest") && Pca.decodeB64uStrict(doc["traits_digest"], 32) == null) return "traits_digest must be a canonical base64url SHA-256 digest"
+                if (doc.containsKey("trait_defs")) {
+                    val td = doc["trait_defs"]
+                    if (td !is List<*> || td.size > 64 || !td.all { it is Map<*, *> }) return "trait_defs must be an array of up to 64 objects"
+                }
+                if (doc.containsKey("pack")) {
+                    val pk = doc["pack"]
+                    if (!exactKeys(pk, "ns", "root", "version") || !isStr(IntentJs.get(pk, "ns"), 64) || !isStr(IntentJs.get(pk, "version"), 128) ||
+                        Pca.decodeB64uStrict(IntentJs.get(pk, "root"), 32) == null) return "pack must be {ns, version, root}"
+                }
+            }
             val verbs = doc["verbs"]
             if (verbs !is List<*> || verbs.isEmpty() || verbs.size > MAX_SCHEMA_VERBS) return "verbs must be 1..$MAX_SCHEMA_VERBS entries"
             val seen = HashSet<String>()
             for (v in verbs) {
-                val e = verbDeclError(v, doc["units"])
+                val e = verbDeclError(v, doc["units"], v2)
                 if (e != null) return e
                 val name = IntentJs.get(v, "verb") as String
                 if (!seen.add(name)) return "verb '$name' is declared twice"
             }
-            val s = doc["sig"]
-            if (s !is Map<*, *>) return "sig must be an object"
-            val sig = IntentJs.obj(s)
-            for (k in sig.keys) if (k !in SIG_KEYS) return "sig: unknown member '$k'"
-            val se = IntentJs.suiteError(sig["alg"], sig.containsKey("alg"))
-            if (se != null) return "sig.alg: $se"
-            if (!isStr(sig["kid"], 128)) return "sig.kid must be a non-empty string"
-            if (!IntentJs.b64any(sig["value"])) return "sig.value is not canonical base64url"
-            if (sig.containsKey("pq_value") && !IntentJs.b64any(sig["pq_value"])) return "sig.pq_value is not canonical base64url"
+            if (signed) {
+                val s = doc["sig"]
+                if (s !is Map<*, *>) return "sig must be an object"
+                val sig = IntentJs.obj(s)
+                for (k in sig.keys) if (k !in SIG_KEYS) return "sig: unknown member '$k'"
+                val se = IntentJs.suiteError(sig["alg"], sig.containsKey("alg"))
+                if (se != null) return "sig.alg: $se"
+                if (!isStr(sig["kid"], 128)) return "sig.kid must be a non-empty string"
+                if (!IntentJs.b64any(sig["value"])) return "sig.value is not canonical base64url"
+                if (sig.containsKey("pq_value") && !IntentJs.b64any(sig["pq_value"])) return "sig.pq_value is not canonical base64url"
+            } else if (doc.containsKey("sig")) return "an unsigned schema must not carry sig"
             IntentJs.canonBytes(body(doc))
             return null
         } catch (e: RuntimeException) {
@@ -240,6 +397,24 @@ object ActionSchema {
                 if (x !is String || Json.hasLoneSurrogate(x)) return "bad_type" to "expected a string"
                 if (IntentJs.u8len(x) > maxLen) return "out_of_domain" to "longer than the declared max_len"
                 if (d.containsKey("values") && !(d["values"] as List<*>).contains(x)) return "out_of_domain" to "not one of the declared values"
+                return formatViolation(d, x)
+            }
+            "object_ref" -> {
+                if (x !is String || Json.hasLoneSurrogate(x) || x.isEmpty()) return "bad_type" to "expected a non-empty id string"
+                if (IntentJs.u8len(x) > maxLen) return "out_of_domain" to "longer than the declared max_len"
+                return formatViolation(d, x)
+            }
+            "datetime" -> {
+                if (x !is String) return "bad_type" to "expected an RFC 3339 UTC string"
+                val m = DATETIME_RE.matchEntire(x)
+                return if (m != null && isCalendarDate(m.groupValues[1])) null else "out_of_domain" to "not an RFC 3339 UTC datetime YYYY-MM-DDTHH:MM:SS[.fff]Z"
+            }
+            "duration" -> {
+                if (!IntentJs.isInt(x)) return "bad_type" to "expected a safe integer (milliseconds)"
+                val v = IntentJs.num(x)!!
+                if (v < 0) return "out_of_domain" to "a duration is not negative"
+                if (d.containsKey("min") && v < IntentJs.num(d["min"])!!) return "out_of_domain" to "below min"
+                if (d.containsKey("max") && v > IntentJs.num(d["max"])!!) return "out_of_domain" to "above max"
                 return null
             }
             "integer" -> {

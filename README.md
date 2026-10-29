@@ -54,6 +54,148 @@ if (verdict.allow) {
 `plan_inclusion`, `leaf_signature`, `counter`). Every check is **fail-closed** — the action is allowed
 only if none reports failure — and a `wire` failure is terminal (nothing else is evaluated).
 
+## authorize (0.5)
+
+`Authorize.authorize` is the full decision for one operation. It runs the verifier checks above, then:
+
+- binds the proof to the operation your handler will execute: the signed verb, resource and params digest must equal
+  it, and the grant's predicates and caveats are evaluated against those params (a proof signed for $50 cannot pay
+  $400);
+- evaluates the grant's envelope predicates (default deny), the envelope's caveats, the caveats placed on the root
+  grant and the caveats added by delegation (`max_spend`, `predicates`, `tool_schema`, `expires`, `rate`, ...; an
+  unknown type is refused);
+- checks revocation with your `isRevoked`;
+- requires provenance by default: a sensitive operation must show that its choice and arguments came from the principal,
+  not from content the agent read (see "Provenance by default" below);
+- consumes the replay counter through an atomic store, only when everything else passed.
+
+Every component is required. Without `audience`, `resolveGrant`, `stateStore`, `isRevoked` or the operation, the call
+is refused and `result.missing` names what is absent. `authorize` never throws: an internal error is a denial.
+
+```kotlin
+import java.sql.DriverManager
+import net.atlasauth.pca.verifier.Authorize
+import net.atlasauth.pca.verifier.PcaJdbcStateStore
+
+// One row per (grant, agent), safe across processes. Any JDBC connection works: SQLite 3.24+ or PostgreSQL 9.5+.
+val store = PcaJdbcStateStore({ DriverManager.getConnection("jdbc:sqlite:pca-replay.db") })
+
+val operation = Authorize.Operation("payments.send", "payments/acme", body) // what you will execute
+val result = Authorize.authorize(
+    pcactn, // the PCActn as JSON text, UTF-8 bytes or a parsed object
+    Authorize.Input(
+        operation = operation,
+        audience = "payments-rs",
+        resolveGrant = { grantRef -> grants[grantRef] }, // from your own store
+        stateStore = store,
+        isRevoked = { _, grant -> grant["id"] as? String in revokedGrantIds }, // your revocation list
+        plan = Authorize.SINGLE_STEP,
+        now = System.currentTimeMillis(), // epoch ms; the default is the wall clock
+        provenanceOptions = Authorize.ProvenanceOptions(mediators = listOf(agentHarnessPin)), // your agent harness's recorder key
+        provenanceHeader = provenanceHeader, // the request's PCA-Provenance header
+    ),
+)
+if (!result.allow) throw SecurityException(result.reason) // e.g. "policy: caveat(s) not satisfied: max_spend"
+sendPayment(body)
+```
+
+- `body` is the request's parsed JSON object (`Json.parse`); params hold JSON values (`Json.Num`, `Int`, `Long`,
+  `String`, `Boolean`, `null`, maps and lists).
+- `plan = Authorize.SINGLE_STEP` accepts a proof whose plan is this one operation. For a multi-step plan, pass
+  `context = { pcactn -> mapOf("plan" to nodes, "plan_authorized" to true) }` with the plan the principal authorized.
+  The context can also carry `subject`, `env`, `blast_radius`, `recent_action_times` and the server's authoritative
+  `reversibility_class`.
+- `result.status` is 200, 401 (no proof, or one that fails authentication) or 403. `result.checks` lists every check
+  (`pass`, `fail` or `not-enforced`) and `result.reason` the decisive failure. On success `result.operation` is the
+  bound operation, and `Authorize.isAuthorizedFor(result, operation)` re-checks it where the side effect runs.
+- `Authorize.MemoryStateStore` is for a single process. Your own store implements `Authorize.StateStore.claim(key,
+  counter)` as one atomic operation (for example a conditional `UPDATE ... WHERE last_counter < ?`), returning
+  `ClaimResult(ok, lastCounter)`.
+- `Authorize.AuthorizeOptions(stateStore, isRevoked)` holds the components a request handler reuses (`plan` defaults
+  to single-step); `options.run(pcactn, operation, audience, resolveGrant)` authorizes one operation.
+- `Authorize.evaluateAgentCaveats`, `Authorize.evaluateToolSchema`, `Authorize.readEnvelope` and
+  `Authorize.rootCaveats` expose the policy steps on their own.
+- Not covered by `authorize` here: the risk score, trust budget and threshold co-signature from the grant's
+  `risk_policy`, revocation epochs and liveness beacons. A grant that pins the agent (`agent_binding`) needs an
+  attestation verifier and is refused, and so is a proof carrying `zk_compliance`.
+
+
+## Provenance by default
+
+`authorize` always runs the provenance gate (check `provenance_flow`). An operation of a sensitive action (anything your action
+facts do not declare as read-only, and every unknown action) runs only when its choice and every argument came from the
+principal, not from content the agent read along the way (a tool result, a retrieved document, a web page). Otherwise the result
+is `escalate` (403, the principal must confirm; reason `provenance_flow: escalate: ...` naming the parameters and the path the
+untrusted content took). A forged, tampered or malformed bundle is a deny.
+
+The evidence is a provenance bundle: receipts signed by the agent's mediator (the harness, gateway or MCP client that builds the
+model's context, with a key the model cannot reach) labelling every segment that entered the context, ending with the action.
+The server pins the mediator's key:
+
+```kotlin
+val result = Authorize.authorize(
+    pcactn,
+    Authorize.Input(
+        operation = operation, audience = "payments-rs", resolveGrant = { grants[it] }, stateStore = store,
+        isRevoked = { _, _ -> false }, plan = Authorize.SINGLE_STEP,
+        provenanceOptions = Authorize.ProvenanceOptions(
+            mediators = listOf(harnessPin),                    // {mediator, kid, pk, pq_pk?} of your agent harness
+            actions = { op -> actionFacts[op.verb] },          // {effects?, traits?, params?}; null = unknown (sensitive)
+        ),
+        provenanceHeader = request.getHeader("PCA-Provenance"), // or provenance = the parsed bundle
+    ),
+)
+```
+
+An action whose facts say it only reads (`effects: ["read"]`, read-safe traits only) needs no bundle. A plan the principal
+authorized in your plan registry (`Input.plans`) covers its exact params; an admitted step of the principal's signed workflow
+makes the choice the principal's (its values still need provenance). The Ktor plugin and the Spring filter read the
+`PCA-Provenance` header, else the JSON body member `pca_provenance`.
+
+The client half is the recorder, run where bytes enter the model's context:
+
+```kotlin
+val rec = ArgProvenance.Recorder("my-harness", "k1", Keys.ed25519(harnessKey))
+rec.principal(userMessage)            // trusted
+rec.tool("crm.lookup", toolOutput)    // untrusted; also retrieval(...) and web(...)
+val bundle = rec.forAction("email.send", "mail", params)
+val header = ArgProvenance.headerOf(bundle)      // send as PCA-Provenance
+```
+
+`ArgProvenance.principalDirect(recorder, operation)` is the bundle for an operation your own UI built from the user's explicit
+input. `rec.pin` is what the server pins. Any signature suite with an Ed25519 identity works, hybrid post-quantum suites included
+(the pin then carries `pq_pk`).
+
+The only opt-out is the principal's signed grant envelope member `provenance: {mode: "insecure_off"}` (check `not-enforced`;
+dangerous: injected content can then choose the action and its values). The same member may list mediator pins
+(`provenance: {mediators: [...]}`), which add to the server's.
+
+## Undo windows
+
+An escalation can instead run now under a veto window, when the action can be undone. `Undo` is the pure layer shared with the
+undo coordinator: `compensationDigest`, the one-click undo token (`signToken`, `tokenCheck`, `encodeToken`, `decodeToken`,
+`tokenDigest`), the signed receipt chain (`signReceipt`, `verifyReceipt`, `receiptDigest`, `receiptChainError`), the state machine
+(`transition`) and `resolveWindow` (30 seconds to 24 hours, 15 minutes by default).
+
+Verify a token a human clicked, and a record's receipt chain, against the undo service's pinned key:
+
+```kotlin
+val token = Undo.decodeToken(param) ?: return refuse()
+when (Undo.tokenCheck(token, undoServiceKey, record, System.currentTimeMillis())) {
+    "ok" -> veto(record)                                  // valid through window_end inclusive
+    else -> refuse()                                      // malformed, signer, signature, record, binding or expired
+}
+val broken: String? = Undo.receiptChainError(record + ("receipts" to receipts), undoServiceKey) // null = sound
+```
+
+To convert escalations, pass an `Authorize.UndoHook` as `Input.undo` (or `AuthorizeOptions.undo`). It is called only for an
+unanswered escalation, never for a deny, and never for a provenance escalation (`provenance_flow` or rule 17 `provenance`):
+reversibility does not make an action that injected content chose safe to run. Return an `Undo.Admission(id, windowEnd,
+compensationVerb, compensationResource)` only after your undo coordinator has durably opened the window's record; return null (or
+throw) to leave the escalation standing. On an admission the result is an allow with `checks.undo_window = "pass"`, `result.undo`
+and the obligation `{kind: "undo_window", params: {id, window_end}, due: window_end}` in `result.obligations`, which your
+enforcement point must honour.
+
 ## Step-up co-sign (principal device, Android)
 
 `net.atlasauth.pca.stepup` is the principal's phone side of PCA: approve or deny a high-risk (t=3) agent
@@ -80,6 +222,52 @@ public `POST /v1/pca/stepups/:id/cosign` (the signature is the credential, no to
 are Ed25519. The key is therefore a **software key**: the seed is encrypted at rest by an AES-256 master
 key in the Android Keystore (hardware-backed where available) but is **not hardware-bound** and sits in
 process memory when used. Gate `approve` behind a BiometricPrompt for user presence.
+
+## Acting as an agent (producing proofs)
+
+The SDK also produces the proofs it verifies: an agent written in Kotlin never needs a TypeScript process. The wire is the reference's byte for byte (strict canonical JSON, the same domain strings); Ed25519 outputs are byte-exact against the shared producer vectors, and the post-quantum PCActns it signs (randomised, so not byte vectors) are verified by the reference implementation as well as by this SDK.
+
+Quickstart: mint a grant (the principal's side), hand the agent its key, and let it act.
+
+```kotlin
+val me = Keys.ed25519(Keys.edGenerate())                       // or Keys.suite("hybrid-ed25519-ml-dsa-65", ed, Keys.pqGenerate(Pq.Prim.ML_DSA_65))
+val agent = Agent(me, "ins_123", grant)                        // the chain defaults to [grant]
+val pcactn = agent.act("pay", "invoice/7", mapOf("amount" to 1200L))
+request.header(Agent.HEADER, Agent.header(pcactn))             // any HTTP client
+val sub = agent.delegate(Keys.ed25519(Keys.edGenerate()), caveats)
+```
+`Issue` holds the issuer side: `mintGrant`, `delegate`, `commitPlan`, `buildPCActn`, `signDischarge`, `signNarrow`, `signEscalationAnswer`, `signPassport`, `signWorkflow`, `signStepReceipt`, `signReadGrant`, `signAggregateGrant`, `signFreshAt`.
+
+Keys: Ed25519, ML-DSA-65/87 and SLH-DSA-SHA2-128f/256s (where the SDK has the library), the hybrids and the nested hybrid. FN-DSA and LESS cannot be signed here and are refused with `unsupported_suite`. A hybrid or pure post-quantum agent needs its post-quantum public key committed in the grant (`holderPqPk`), and the verifier needs the principal's post-quantum key pinned.
+
+## One call: protect, and explaining a refusal
+
+`protect()` fills in the parts every server wires by hand: the grant lookup (your list or function, never the request), an
+in-memory replay store, a revocation source and `plan = "single-step"`. Anything you set in the `customize` block wins.
+
+```kotlin
+val p = protect("payments-rs", listOf(grant)) { call, body -> Authorize.Operation("payments.send", "payments/acme", paramsOf(body)) }
+routing { route("/refunds") { install(PcaGuardPlugin, p.configure); post { /* call.pca!! */ } } }
+p.revoke(grant["id"] as String) // later: every action under that grant is refused
+```
+
+The in-memory store is per process; set `authorize` in `customize` with a shared store when you run more than one instance. Unlike
+the TypeScript helper, `protect()` does not price risk from a connector catalog (this library has none). A complete runnable
+server is in `examples/ktor-server`.
+
+Every refusal body also carries a `doc` member, the page that explains the refusal. `explainRefusal(reason)` returns the same
+guidance in code (`check`, `meaning`, `fix`, `docs`); the reason strings themselves are never reworded.
+
+## What a passing result does not cover
+
+`counter: pass` is a format check (a non-negative integer); it does **not** mean the action was not replayed.
+Verification is stateless and this package has no replay store, so the resource server must persist, per grant and
+agent, the last accepted counter and refuse anything not strictly greater, atomically across all of its processes.
+
+The verifier is the core verifier only (this package has no HTTP middleware). It does not check replay, revocation, caveats, envelope predicates, plan authorization, risk or
+thresholds, and it does not compare the request body with the signed `params_digest`. Do those checks in your
+handler (the caveat helpers, the params digest of the body you will execute, your replay and revocation stores), or
+delegate the decision to a full verifier such as `requirePCA` from `@atlasauth/pca`.
 
 ## Conformance
 
