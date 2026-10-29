@@ -374,4 +374,102 @@ object Predicates {
             false
         }
     }
+
+    // ---- limit-naming denial reasons (0.5) ----
+
+    private val OP_TEXT: Map<String, String> = mapOf(
+        "eq" to "==", "ne" to "!=", "lt" to "<", "lte" to "<=", "gt" to ">", "gte" to ">=", "in" to "in", "nin" to "not in",
+        "prefix" to "starts with", "like" to "like", "matches" to "matches", "is_a" to "is a", "member_of" to "member of",
+    )
+    private const val MAX_SHOWN_STRING = 64
+    private const val MAX_SHOWN_ITEMS = 8
+
+    private fun isGroup(c: Any?): Boolean = c is Map<*, *> && (c.containsKey("all_of") || c.containsKey("any_of") || c.containsKey("not"))
+
+    /** A scalar operand in a denial reason: safe integers, booleans, null and plain short strings are spelled out. */
+    internal fun showValue(v: Any?, depth: Int = 0): String = when {
+        v == null -> "null"
+        v is Boolean -> v.toString()
+        v is Json.Num || v is Number -> if (Json.isSafeInt(v)) Json.asLong(v).toString() else "<number>"
+        v is String ->
+            if (v.length <= MAX_SHOWN_STRING && v.none { it < ' ' || it == '"' || it == '\\' || it in '\uD800'..'\uDFFF' }) "\"$v\"" else "\"...\""
+        v is List<*> && depth == 0 -> if (v.size <= MAX_SHOWN_ITEMS) v.joinToString(", ", "[", "]") { showValue(it, 1) } else "[...]"
+        else -> "<value>"
+    }
+
+    /** The condition as the limit a reader recognises: `amount <= 500`, `currency in ["usd", "eur"]`. */
+    internal fun describeCondition(c: Any?, depth: Int = 0): String {
+        if (!isJsObject(c)) return "<condition>"
+        if (isGroup(c)) {
+            val m = c as Map<*, *>
+            if (depth >= 2) return "(...)"
+            val all = m["all_of"]
+            val any = m["any_of"]
+            return when {
+                all is List<*> -> "all of (" + describeAll(all, depth) + ")"
+                any is List<*> -> "any of (" + describeAll(any, depth) + ")"
+                m.containsKey("not") -> "not (" + describeCondition(m["not"], depth + 1) + ")"
+                else -> "<condition>"
+            }
+        }
+        val m: Map<*, *> = c as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        val f = m["field"] as? String ?: "<field>"
+        val name = if (f.startsWith("action.params.")) f.substring("action.params.".length) else f
+        val op = m["op"]
+        if (op == "exists") return if (m["value"] == false) "$name absent" else "$name present"
+        val text = (op as? String)?.let { OP_TEXT[it] } ?: return "$name <condition>"
+        val operand = when {
+            m.containsKey("ref") -> m["ref"] as? String ?: "<ref>"
+            m.containsKey("value") -> showValue(m["value"])
+            else -> "<value>"
+        }
+        return "$name $text $operand"
+    }
+
+    private fun describeAll(xs: List<*>, depth: Int): String = xs.take(MAX_SHOWN_ITEMS).joinToString("; ") { describeCondition(it, depth + 1) }
+
+    /** Inside an unmet top-level condition, the narrowest part that failed (an `all_of` points at its first unmet child). */
+    private fun narrowestUnmet(c: Any?, ctx: Map<String, Any?>?, depth: Int = 0): Any? {
+        val xs = (c as? Map<*, *>)?.get("all_of")
+        if (depth < 4 && xs is List<*>) for (x in xs) if (!evaluateCondition(x, ctx)) return narrowestUnmet(x, ctx, depth + 1)
+        return c
+    }
+
+    /**
+     * When a predicate's verb and resource are in scope but a `where` limit is not met, that limit described
+     * (`amount <= 100`); null when no predicate is in scope (the plain "no predicate permits" wording stays).
+     */
+    fun firstUnmetLimit(predicates: Any?, ctx: Map<String, Any?>?): String? = SafeRegex.withBudget {
+        try {
+            val a = ctx?.get("action")
+            if (a !is Map<*, *> || predicates !is List<*>) return@withBudget null
+            val verb = a["verb"]
+            val resource = a["resource"]
+            if (verb !is String || resource !is String) return@withBudget null
+            for (p in predicates) {
+                if (p !is Map<*, *> || !verbMatches(p["verb"], verb) || !resourceMatches(p, resource)) continue
+                val w = p["where"] as? List<*> ?: continue
+                for (c in w) if (!evaluateCondition(c, ctx)) return@withBudget describeCondition(narrowestUnmet(c, ctx))
+            }
+            null
+        } catch (e: RuntimeException) {
+            null
+        } catch (e: StackOverflowError) {
+            null
+        }
+    }
+
+    /**
+     * Why [evaluatePredicates] denied, or null when it allows: `envelope grants no predicates` for an empty set,
+     * `<limit> not satisfied for <verb> on <resource>` when a limit in scope is unmet, else `no predicate permits <verb> on <resource>`.
+     */
+    fun denialReason(predicates: Any?, ctx: Map<String, Any?>?): String? {
+        if (evaluatePredicates(predicates, ctx)) return null
+        if (predicates !is List<*> || predicates.isEmpty()) return "envelope grants no predicates"
+        val a = ctx?.get("action") as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        val vr = IntentRevocation.jsText(IntentJs.normalize(a["verb"]), a.containsKey("verb")) + " on " +
+            IntentRevocation.jsText(IntentJs.normalize(a["resource"]), a.containsKey("resource"))
+        val limit = firstUnmetLimit(predicates, ctx)
+        return if (limit != null) "$limit not satisfied for $vr" else "no predicate permits $vr"
+    }
 }

@@ -10,7 +10,7 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519
  * Native Kotlin reference verifier for the CORE PCActn checks, wire format v2. Byte-matches `@atlasauth/pca`
  * (the TypeScript source of truth) and the sibling language verifiers (java-pca, go-pca, python-pca, ...).
  *
- * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter`, then
+ * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter_format`, then
  * `intent` when evaluated (Intent Layer M2, see [IntentPolicy]) (a wire failure is terminal). Requires BouncyCastle (`org.bouncycastle.math.ec.rfc8032.Ed25519`), which the
  * module already depends on for the step-up client.
  *
@@ -71,6 +71,8 @@ object Pca {
 
     // ---- Intent Layer M2: envelope.intent ----
     const val INTENT_GOAL_PREFIX = "pca-intent:v1:"
+    /** Goal binding v3: `pca-intent:v3:<goal_digest>:<policy_digest>` (the signed Goal IR and the policy compiled from it). */
+    const val INTENT_GOAL_V3_PREFIX = "pca-intent:v3:"
     /** Domain of the root grant's salted goal commitment (envelope goal_commit). */
     const val INTENT_GOAL_COMMIT_DOMAIN = "atlas-pca/goal/v1\u0000"
     const val PPM_ONE = 1_000_000L
@@ -91,9 +93,11 @@ object Pca {
         val minFidelityPpm: Double? = null,
         /** Deny when the claimed `residual_risk_ppm` is above this (null = unset). Setting it implies require. */
         val maxResidualRiskPpm: Double? = null,
+        /** Goal binding v3: the root grant must open against exactly this Goal IR + compiled policy. Setting it implies require. */
+        val approvedGoal: ApprovedGoal? = null,
     ) {
         /** True iff the policy is active (the intent check runs even for a PCActn without the field). */
-        val isActive: Boolean get() = require || minFidelityPpm != null || maxResidualRiskPpm != null
+        val isActive: Boolean get() = require || minFidelityPpm != null || maxResidualRiskPpm != null || approvedGoal != null
 
         companion object {
             /**
@@ -103,7 +107,10 @@ object Pca {
              */
             fun fromJson(o: Any?): IntentPolicy? {
                 if (o !is Map<*, *>) return null
-                return IntentPolicy(o["require"] == true, threshold(o, "min_fidelity_ppm"), threshold(o, "max_residual_risk_ppm"))
+                return IntentPolicy(
+                    o["require"] == true, threshold(o, "min_fidelity_ppm"), threshold(o, "max_residual_risk_ppm"),
+                    if (o.containsKey("approved_goal")) ApprovedGoal.fromJson(o["approved_goal"]) else null,
+                )
             }
 
             /**
@@ -124,6 +131,32 @@ object Pca {
             }
         }
     }
+
+    /**
+     * The digests a v3 goal commitment binds: canonical base64url (32 bytes) of the signed Goal IR and of the compiled policy.
+     * [closed] is false when the configured object had a member other than exactly `goal_digest` and `policy_digest` (or was
+     * not an object): such a policy is a misconfiguration and fails closed, as does a short, padded or empty digest.
+     */
+    class ApprovedGoal(val goalDigest: String?, val policyDigest: String?, val closed: Boolean = true) {
+        val isWellFormed: Boolean get() = closed && decodeB64uStrict(goalDigest, 32) != null && decodeB64uStrict(policyDigest, 32) != null
+
+        companion object {
+            /** From a parsed JSON value; anything but an object of exactly the two members yields a malformed (fail-closed) ref. */
+            fun fromJson(o: Any?): ApprovedGoal =
+                if (o is Map<*, *>) ApprovedGoal(o["goal_digest"] as? String, o["policy_digest"] as? String, o.size == 2)
+                else ApprovedGoal(null, null, false)
+        }
+    }
+
+    /** The v3 goal string. Throws [IllegalArgumentException] on a malformed digest: never commit to garbage. */
+    fun intentGoalV3(ref: ApprovedGoal): String {
+        require(ref.isWellFormed) { "intentGoalV3: goal_digest and policy_digest must be canonical base64url (32 bytes)" }
+        return INTENT_GOAL_V3_PREFIX + ref.goalDigest + ":" + ref.policyDigest
+    }
+
+    /** The v3 goal commitment for a salt (same domain and hash as [intentGoalCommit]). */
+    fun intentGoalCommitV3(ref: ApprovedGoal, goalSalt: String): String =
+        hashCanonical(linkedMapOf<String, Any?>("d" to INTENT_GOAL_COMMIT_DOMAIN, "goal" to intentGoalV3(ref), "salt" to goalSalt))
 
     /** A set policy threshold must be a safe integer >= 0 (finite, integral, not -0, <= 2^53-1). */
     internal fun okThreshold(x: Double?): Boolean {
@@ -197,10 +230,17 @@ object Pca {
         return try {
             if (active && (!okThreshold(policy!!.minFidelityPpm) || !okThreshold(policy.maxResidualRiskPpm)))
                 return "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)"
+            val v3 = policy?.approvedGoal
+            if (active && v3 != null && !v3.isWellFormed)
+                return "intent policy misconfigured: approved_goal digests must be canonical base64url (32 bytes) (fail closed)"
             if (!present) return "this verifier requires an intent binding but the PCActn carries none"
             val commit = rootGoalCommit(grant) ?: return "the root grant carries no envelope goal commitment to bind the intent to"
             val i = intent as Map<*, *>
-            val opened = if (session != null) {
+            if (v3 != null) {
+                if (intentGoalCommitV3(v3, i["goal_salt"] as String) != commit)
+                    return "the root grant's goal commitment does not open to the approved goal and compiled policy (v3)"
+            }
+            val opened = if (v3 != null) commit else if (session != null) {
                 if (mapForm == IntentMap.MAP_FORM_COMMIT) intentGoalCommitV2c(session, i["map_digest"] as String, i["goal_salt"] as String)
                 else intentGoalCommitV2(session, i["map_digest"] as String, i["goal_salt"] as String)
             }
@@ -224,8 +264,15 @@ object Pca {
         var allow = false
         val checks = LinkedHashMap<String, Boolean>()
         var reason = ""
+
+        /** EVERY failing check's reason (`<check>: <why>`), in check order: the ternary decision reads the full set, not the first. */
+        val reasons: MutableList<String> = ArrayList()
+
+        /** Rule 21 `legacy` model polarity was in effect: the verdict is degraded (a strict verifier must not rely on it). */
+        var legacyModelPolarity = false
         internal fun fail(name: String, why: String) {
             checks[name] = false
+            reasons.add("$name: $why")
             if (reason.isEmpty()) reason = "$name: $why"
         }
     }
@@ -296,9 +343,9 @@ object Pca {
     fun hashStrict(v: Any?): String = b64(sha(Json.canonicalizeStrict(v).toByteArray(StandardCharsets.UTF_8)))
 
     // ---- Merkle ----
-    private fun leafHash(leaf: Any?): ByteArray = sha(byteArrayOf(0x00), canonBytes(leaf))
+    internal fun leafHash(leaf: Any?): ByteArray = sha(byteArrayOf(0x00), canonBytes(leaf))
 
-    private fun nodeHash(l: ByteArray, r: ByteArray): ByteArray = sha(byteArrayOf(0x01), l, r)
+    internal fun nodeHash(l: ByteArray, r: ByteArray): ByteArray = sha(byteArrayOf(0x01), l, r)
 
     fun merkleRoot(leaves: List<Any?>): String {
         if (leaves.isEmpty()) throw IllegalArgumentException("empty leaf set")
@@ -315,7 +362,7 @@ object Pca {
     }
 
     /** Sibling sides (leaf to root) for leaf `index` of `size` leaves (RFC 6962 split). Requires 0 <= index < size. */
-    private fun pathShape(index: Long, size: Long): List<String> {
+    internal fun pathShape(index: Long, size: Long): List<String> {
         val out = ArrayList<String>()
         var idx = index
         var n = size
@@ -357,14 +404,14 @@ object Pca {
     fun paramsDigest(params: Any?): String =
         hashCanonical(params ?: LinkedHashMap<String, Any?>())
 
-    private fun conditionsDigest(pre: Any?, post: Any?): String {
+    @JvmName("conditionsDigest") internal fun conditionsDigest(pre: Any?, post: Any?): String {
         val m = LinkedHashMap<String, Any?>()
         m["pre"] = pre
         m["post"] = post
         return hashCanonical(m)
     }
 
-    private fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
+    @JvmName("planLeaf") internal fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
         if (nodeId == null) throw IllegalArgumentException("missing node_id")
         val pd = action["params_digest"] ?: paramsDigest(null)
         val rc = action["reversibility_class"] ?: DEFAULT_REV
@@ -628,6 +675,8 @@ object Pca {
         "intent",
         // Intent Layer v2 (additive, SIGNED): the session member (rule 13; see IntentSession.validateWire / IntentV2).
         "intent_session",
+        // Consistency token (additive, SIGNED): the `fresh_at` member (see FreshAt.validateWire / FreshAt.decide).
+        "fresh_at",
         // B4 crypto-agility (additive): absent `alg` == "ed25519" and validates exactly as today.
         "alg", "pq_pk", "pq_sig",
     )
@@ -770,6 +819,7 @@ object Pca {
             if (p.containsKey("progress_step") && !isObj(p["progress_step"])) return "'progress_step' must be an object"
             if (p.containsKey("intent")) validateIntentWire(p["intent"])?.let { return it }
             if (p.containsKey("intent_session")) IntentSession.validateWire(p["intent_session"])?.let { return it }
+            if (p.containsKey("fresh_at")) FreshAt.validateWire(p["fresh_at"])?.let { return it }
             if (p.containsKey("prohibition_evidence") && !isObj(p["prohibition_evidence"]) && p["prohibition_evidence"] !is List<*>)
                 return "'prohibition_evidence' must be an object or array"
             if (p.containsKey("threshold")) {
@@ -803,7 +853,7 @@ object Pca {
     /** Verify raw PCActn JSON text: strict-profile parse first (any failure, or a non-object, is a wire failure). */
     fun verifyPcactnJson(
         text: String, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
-        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null, freshAt: FreshAt.Policy? = null,
     ): Verdict {
         if (artifactTooLarge(text)) { // FIRST: before any parsing
             val big = Verdict()
@@ -818,31 +868,32 @@ object Pca {
             v.fail("wire", "strict JSON: ${e.message}")
             return v
         }
-        return verifyPcactn(parsed, grant, now, audience, allowedSuites, intentPolicy, intentV2)
+        return verifyPcactn(parsed, grant, now, audience, allowedSuites, intentPolicy, intentV2, freshAt)
     }
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
-     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter, then `intent` iff the PCActn carries
+     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter_format, then `intent` iff the PCActn carries
      * `intent` or [intentPolicy] is active (Intent Layer M2; absent both, the verdict is the pre-M2 one), then the Intent
      * Layer v2 checks `schema`, `intent_session`, `layers`, `accumulators`, `facts`, `provenance`, `classes` exactly when
-     * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before).
-     * allow = every check true.
+     * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before), then
+     * `fresh_at` (the consistency token; see [FreshAt.decide]) iff the PCActn carries the member, [freshAt] reads a side-carried token or
+     * requires one. allow = every check true.
      */
     fun verifyPcactn(
         pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
-        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null, freshAt: FreshAt.Policy? = null,
     ): Verdict =
         // TOTAL (R6-05): any residual fault on hostile input is a terminal wire refusal, never an exception.
         try {
-            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites, intentPolicy, intentV2)
+            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites, intentPolicy, intentV2, freshAt)
         } catch (ex: RuntimeException) {
             Verdict().also { it.fail("wire", "malformed input (${ex.javaClass.simpleName})") }
         }
 
     private fun verifyPcactnUnchecked(
         pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>?,
-        intentPolicy: IntentPolicy?, intentV2: IntentV2.Context?,
+        intentPolicy: IntentPolicy?, intentV2: IntentV2.Context?, freshAt: FreshAt.Policy?,
     ): Verdict {
         val v = Verdict()
         val wire = validateWireV2(pcactn)
@@ -925,8 +976,8 @@ object Pca {
             else v.fail("leaf_signature", "signature does not verify under the leaf holder key")
 
             // counter
-            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter"] = true
-            else v.fail("counter", "missing or not a non-negative safe integer")
+            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter_format"] = true
+            else v.fail("counter_format", "missing or not a non-negative safe integer")
 
             // Intent Layer M2: `intent` (reported iff the PCActn carries intent or the policy is active)
             val session = if (p.containsKey("intent_session")) asMap(p["intent_session"])["session"] else null
@@ -936,18 +987,35 @@ object Pca {
                 if (intentWhy.isEmpty()) v.checks["intent"] = true else v.fail("intent", intentWhy)
             }
         } catch (e: RuntimeException) {
-            if (v.reason.isEmpty()) v.reason = "malformed PCActn: $e"
+            if (v.reason.isEmpty()) { v.reason = "malformed PCActn: $e"; v.reasons.add(v.reason) }
         }
         // any check not reached (internal error) is a failure; keep normative key order
         val ordered = LinkedHashMap<String, Boolean>()
-        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"))
+        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"))
             ordered[k] = v.checks[k] == true
         if (intentReported) ordered["intent"] = v.checks["intent"] == true
         // Intent Layer v2 (rules 13-18): reported in pipeline order exactly when IntentV2 reports them (total: never throws)
-        for (c in IntentV2.decide(p, grant, intentV2, now).checks) {
+        val v2 = IntentV2.decide(p, grant, intentV2, now)
+        for (c in v2.checks) {
             ordered[c.name] = c.ok
-            if (!c.ok && v.reason.isEmpty()) v.reason = "${c.name}: ${c.reason}"
+            if (!c.ok) {
+                val r = "${c.name}: ${c.reason}"
+                if (!v.reasons.contains(r)) v.reasons.add(r) // a reason already listed (the core's first failure) is listed once
+                if (v.reason.isEmpty()) v.reason = r
+            }
         }
+        // Consistency token: `fresh_at`, right after the intent checks; reported only when the PCActn carries the member, a side-carried token
+        // is read, or the policy requires one (otherwise no entry: byte-identical to before). A stale verifier is an `escalate:` failure.
+        val fa = FreshAt.decide(p["fresh_at"], p.containsKey("fresh_at"), freshAt, now)
+        if (fa.status != FreshAt.Status.NONE) {
+            ordered["fresh_at"] = fa.status == FreshAt.Status.PASS
+            if (fa.status == FreshAt.Status.FAIL) {
+                val r = "fresh_at: ${fa.reason}"
+                v.reasons.add(r)
+                if (v.reason.isEmpty()) v.reason = r
+            }
+        }
+        v.legacyModelPolarity = v2.legacyModelPolarity
         v.checks.clear()
         v.checks.putAll(ordered)
         v.allow = !v.checks.containsValue(false)

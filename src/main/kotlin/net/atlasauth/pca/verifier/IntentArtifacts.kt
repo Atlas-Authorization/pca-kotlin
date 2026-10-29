@@ -31,7 +31,7 @@ internal object IntentArtifacts {
 
     /** Null when every key is listed and every required key is present, else the reason. */
     fun closedMembers(o: Map<String, Any?>, required: List<String>, optional: List<String>, where: String): String? {
-        for (k in o.keys) if (k !in required && k !in optional) return "unknown member '$where.$k'"
+        for (k in IntentJs.jsKeys(o)) if (k !in required && k !in optional) return "unknown member '$where.$k'"
         for (k in required) if (!o.containsKey(k)) return "missing member '$where.$k'"
         return null
     }

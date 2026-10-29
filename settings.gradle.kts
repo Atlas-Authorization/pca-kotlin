@@ -15,3 +15,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "atlas-pca-stepup"
+
+// Framework integrations: pure-JVM modules, so the core library keeps no Ktor / Spring dependency.
+include(":pca-ktor", ":pca-spring")
