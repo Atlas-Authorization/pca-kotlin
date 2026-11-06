@@ -1,12 +1,13 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.jvm) apply false // the JVM-only integration modules (Ktor, Spring) below
 }
 
 // Principal-device step-up module for PCA. Deliberately NOT part of the atlas-android
 // auth SDK: it is a separate artifact with its own tiny dependency set.
 group = "net.atlasauth"
-version = "0.4.1"
+version = "0.5.0"
 
 android {
     namespace = "net.atlasauth.pca.stepup"
@@ -22,7 +23,17 @@ android {
     }
     kotlinOptions { jvmTarget = "1.8" }
 
-    testOptions { unitTests { isReturnDefaultValues = true } }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+            // the attestation vector file (real vendor evidence) is large
+            all {
+                it.maxHeapSize = "3g"
+                it.jvmArgs("-Xss16m", "-XX:+HeapDumpOnOutOfMemoryError", "-XX:HeapDumpPath=/tmp")
+                it.testLogging { exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL; showStandardStreams = true }
+            }
+        }
+    }
 }
 
 dependencies {
@@ -35,6 +46,7 @@ dependencies {
     implementation(libs.bouncycastle)
 
     testImplementation(libs.junit)
+    testImplementation(libs.sqlite.jdbc) // the JDBC replay store's tests only
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
 }

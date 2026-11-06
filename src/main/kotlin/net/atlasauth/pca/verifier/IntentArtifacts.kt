@@ -31,7 +31,7 @@ internal object IntentArtifacts {
 
     /** Null when every key is listed and every required key is present, else the reason. */
     fun closedMembers(o: Map<String, Any?>, required: List<String>, optional: List<String>, where: String): String? {
-        for (k in o.keys) if (k !in required && k !in optional) return "unknown member '$where.$k'"
+        for (k in IntentJs.jsKeys(o)) if (k !in required && k !in optional) return "unknown member '$where.$k'"
         for (k in required) if (!o.containsKey(k)) return "missing member '$where.$k'"
         return null
     }
@@ -71,7 +71,8 @@ internal object IntentArtifacts {
      * own `pq_pk` alone never authorises it); malformed input is a failed signature. Never throws.
      */
     fun verifyArtifactSig(domain: String, artifact: Map<String, Any?>, pinnedPk: Any?, pinnedPqPk: Any?): Boolean = try {
-        if (artifact["sig"] !is String || pinnedPk !is String) false
+        // a non-string sig is refused by verifyPinnedSuite itself (verifyEd / Pq.verifySuite: `sig is String`)
+        if (pinnedPk !is String) false
         else IntentJs.verifyPinnedSuite(
             artifact["alg"], artifact.containsKey("alg"), pinnedPk, artifact["pq_pk"],
             artifactMessage(domain, artifact), artifact["sig"], artifact["pq_sig"], IntentJs.pin(pinnedPk, pinnedPqPk),
@@ -97,7 +98,7 @@ internal object IntentArtifacts {
     fun isParamPath(path: Any?): Boolean {
         if (path !is String || !path.startsWith("action.params.")) return false
         val segs = path.substring("action.params.".length).split(".")
-        if (segs.isEmpty() || segs.size > 8) return false
+        if (segs.size > 8) return false // split always yields at least one segment
         return segs.all { isPathSegment(it) }
     }
 

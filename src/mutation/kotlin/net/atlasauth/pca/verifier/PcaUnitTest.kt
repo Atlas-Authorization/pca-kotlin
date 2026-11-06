@@ -465,13 +465,13 @@ class PcaUnitTest {
         val raw = vec("valid-raw-json-format-insensitive")["pcactn_json"] as String
         var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, KUtil.Of)
         assertTrue(g.allow); assertEquals("", g.reason)
-        assertEquals(listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"), g.checks.keys.toList())
+        assertEquals(listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"), g.checks.keys.toList())
         g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of); assertTrue(g.allow)
         // audience tri-state
         g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Any); assertTrue(g.allow)
         g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Unset)
         assertFalse(g.allow); assertEquals("audience: PCActn carries a signed aud but this verifier supplied no audience", g.reason)
-        assertEquals(false, g.checks["audience"]); assertEquals(true, g.checks["counter"]); assertEquals(true, g.checks["leaf_signature"])
+        assertEquals(false, g.checks["audience"]); assertEquals(true, g.checks["counter_format"]); assertEquals(true, g.checks["leaf_signature"])
         g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Of("other"))
         assertEquals("audience: aud does not match this resource server / instance", g.reason)
         // wire
@@ -494,12 +494,12 @@ class PcaUnitTest {
         assertEquals(true, Pca.verifyPcactn(p, validGrant(), iat + 600000, KUtil.Of).checks["validity"])
         p = mm(Json.parse(raw)); p["counter"] = n("-1")
         g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of)
-        assertEquals(false, g.checks["counter"]); assertEquals("leaf_signature: signature does not verify under the leaf holder key", g.reason)
-        p["counter"] = n("0"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["counter"])
+        assertEquals(false, g.checks["counter_format"]); assertEquals("leaf_signature: signature does not verify under the leaf holder key", g.reason)
+        p["counter"] = n("0"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["counter_format"])
         p = mm(Json.parse(raw)); p["cap_chain"] = ArrayList<Any?>()
         g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of)
         assertEquals("chain: empty chain", g.reason)
-        assertEquals(listOf(false, false, false, true, true), listOf(g.checks["chain"], g.checks["grant_ref_bound"], g.checks["leaf_signature"], g.checks["plan_inclusion"], g.checks["counter"]))
+        assertEquals(listOf(false, false, false, true, true), listOf(g.checks["chain"], g.checks["grant_ref_bound"], g.checks["leaf_signature"], g.checks["plan_inclusion"], g.checks["counter_format"]))
         p = mm(Json.parse(raw)); val first = ll(p["cap_chain"])[0]
         p["cap_chain"] = ArrayList<Any?>().also { c -> repeat(17) { c.add(first) } }
         assertEquals("chain: chain too long (max 16 hops)", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
@@ -512,7 +512,7 @@ class PcaUnitTest {
         val g4 = LinkedHashMap(validGrant()); g4["weird"] = Any()
         g = Pca.verifyPcactn(Json.parse(raw), g4, NOW, KUtil.Of)
         assertTrue(g.reason, g.reason.startsWith("malformed PCActn: java.lang.IllegalArgumentException: canonicalize: unsupported type")); assertFalse(g.allow)
-        assertEquals(true, g.checks["wire"]); assertEquals(true, g.checks["version"]); assertEquals(false, g.checks["chain"]); assertEquals(false, g.checks["counter"]); assertEquals(false, g.checks["leaf_signature"])
+        assertEquals(true, g.checks["wire"]); assertEquals(true, g.checks["version"]); assertEquals(false, g.checks["chain"]); assertEquals(false, g.checks["counter_format"]); assertEquals(false, g.checks["leaf_signature"])
         p = mm(Json.parse(raw)); p["ver"] = n("3")
         assertEquals("version: unsupported ver (this verifier requires 2)", Pca.verifyPcactn(p, g4, NOW, KUtil.Of).reason)
         p = mm(Json.parse(raw)); p["grant_ref"] = B32.replace('q', 'r')
@@ -618,7 +618,7 @@ class PcaUnitTest {
     }
 
     @Test fun intentVerify() {
-        val base = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+        val base = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format")
         val raw = vec("valid-raw-json-format-insensitive")["pcactn_json"] as String
         val of = Pca.Audience.Of(AUD)
         var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of)
@@ -653,7 +653,7 @@ class PcaUnitTest {
     private val iNone = "this verifier requires an intent binding but the PCActn carries none"
     private val iNoEnv = "the root grant carries no envelope goal commitment to bind the intent to"
     private val iOpen = "intent ref / map_digest / goal_salt do not open the root grant's goal commitment"
-    private val baseKeys = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+    private val baseKeys = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format")
     private val intentKeys = baseKeys + "intent"
 
     private fun slotWith(k: String, v: Any?) = intentSlot().also { it[k] = v }

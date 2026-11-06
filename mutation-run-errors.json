@@ -1,0 +1,543 @@
+[
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentV2.kt",
+  "method": "sessionStep",
+  "text": "for (i in 0 until seq.toInt()) ids.add(IntentRevocation.deltaRevocationId(IntentRevocation.jsText(IntentJs.get(prior[i], \"id\"), IntentJs.own(prior[i], \"id\"))))",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "`for (i in 0 until seq.toInt())` without the i++: the loop is entered only when seq >= 1 and i stays 0 < seq for ever, so `ids.add(...)` appends without end until the heap is exhausted. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentAcc.kt",
+  "method": "monitorStates$pca_kotlin_mutation",
+  "text": "for (i in 1..w) out.add(\"pending:$i\")",
+  "mut": "MathMutator",
+  "desc": "Replaced long addition with subtraction",
+  "reason": "`for (i in 1..w)` compiles to i = 1; while (true) { body; if (i == w) break; i += 1 }: with the step turned into i - 1, i runs 1, 0, -1, ... and never equals w >= 2, so `out.add(\"pending:$i\")` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentAcc.kt",
+  "method": "monitorStates$pca_kotlin_mutation",
+  "text": "for (i in 1..w) out.add(\"pending:$i\")",
+  "mut": "NegateConditionalsMutator",
+  "desc": "negated conditional",
+  "reason": "the range-entry test `1 <= w` negated: for w <= 0 (an absent or zero `within` gives w = 0) the loop is entered, i counts up from 1 and never equals w, so `out.add(...)` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentAcc.kt",
+  "method": "monitorStates$pca_kotlin_mutation",
+  "text": "for (i in 1..w) out.add(\"pending:$i\")",
+  "mut": "RemoveConditionalMutator_EQUAL_IF",
+  "desc": "removed conditional - replaced equality check with true",
+  "reason": "the loop-exit test `i == w` removed: the loop never breaks, so `out.add(...)` appends without end (i would only wrap after 2^63 steps). The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentAcc.kt",
+  "method": "monitorStates$pca_kotlin_mutation",
+  "text": "for (i in 1..w) out.add(\"pending:$i\")",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the range-entry test `1 <= w` forced true: for w <= 0 the loop is entered, i counts up from 1 and never equals w, so `out.add(...)` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Predicates.kt",
+  "method": "parseGlob",
+  "text": "i++",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "the parser cursor in parseGlob no longer advances past the consumed character (`i++`: Changed increment from 1 to -1): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "isSafeSource",
+  "text": "i++",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "the parser cursor in isSafeSource no longer advances past the consumed character (`i++`: Changed increment from 1 to -1): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "isSafeSource",
+  "text": "i += 3",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 3",
+  "reason": "the parser cursor in isSafeSource no longer advances past the consumed character (`i += 3`: Removed increment 3): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "isSafeSource",
+  "text": "} else i += 1",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "the parser cursor in isSafeSource no longer advances past the consumed character (`} else i += 1`: Removed increment 1): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "alt",
+  "text": "while (at(i) == '|'.code) { i++; items.add(cat()) }",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in alt no longer advances past the consumed character (`while (at(i) == '|'.code) { i++; items.add(cat()) }`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "alt",
+  "text": "while (at(i) == '|'.code) { i++; items.add(cat()) }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in alt no longer advances past the consumed character (`while (at(i) == '|'.code) { i++; items.add(cat()) }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "alt",
+  "text": "while (at(i) == '|'.code) { i++; items.add(cat()) }",
+  "mut": "NegateConditionalsMutator",
+  "desc": "negated conditional",
+  "reason": "`while (at(i) == '|'.code)` negated / forced true: at the end of the source at(i) is -1, so the loop keeps calling cat() and `items.add` appends an empty alternative without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "alt",
+  "text": "while (at(i) == '|'.code) { i++; items.add(cat()) }",
+  "mut": "RemoveConditionalMutator_EQUAL_IF",
+  "desc": "removed conditional - replaced equality check with true",
+  "reason": "`while (at(i) == '|'.code)` negated / forced true: at the end of the source at(i) is -1, so the loop keeps calling cat() and `items.add` appends an empty alternative without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "alt",
+  "text": "while (at(i) == '|'.code) { i++; items.add(cat()) }",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in alt no longer advances past the consumed character (`while (at(i) == '|'.code) { i++; items.add(cat()) }`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'.' -> { i++; return set(CharSet(LINE_TERMINATORS, true)) }",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'.' -> { i++; return set(CharSet(LINE_TERMINATORS, true)) }`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'^' -> { i++; return Node('^') }",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'^' -> { i++; return Node('^') }`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'$' -> { i++; return Node('$') }",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'$' -> { i++; return Node('$') }`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "i++",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`i++`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'^' -> { i++; return Node('^') }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'^' -> { i++; return Node('^') }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'$' -> { i++; return Node('$') }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'$' -> { i++; return Node('$') }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'.' -> { i++; return set(CharSet(LINE_TERMINATORS, true)) }",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'.' -> { i++; return set(CharSet(LINE_TERMINATORS, true)) }`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'^' -> { i++; return Node('^') }",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'^' -> { i++; return Node('^') }`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'$' -> { i++; return Node('$') }",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`'$' -> { i++; return Node('$') }`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "i++",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in atom no longer advances past the consumed character (`i++`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "cls",
+  "text": "for (x in a.set.ranges) ranges.add(intArrayOf(x[0], x[1]))",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "`for (x in ...set.ranges) ranges.add(...)` without its index increment: the loop re-reads ranges[0] for ever and `ranges.add` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation.",
+  "multiplicity": 2
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "cls",
+  "text": "for (x in b.set.ranges) ranges.add(intArrayOf(x[0], x[1]))",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "`for (x in ...set.ranges) ranges.add(...)` without its index increment: the loop re-reads ranges[0] for ever and `ranges.add` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "escapeInner",
+  "text": "i += 2",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in escapeInner no longer advances past the consumed character (`i += 2`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "quantified",
+  "text": "'*'.code -> { min = 0; max = Double.POSITIVE_INFINITY; i++ }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in quantified no longer advances past the consumed character (`'*'.code -> { min = 0; max = Double.POSITIVE_INFINITY; i++ }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "quantified",
+  "text": "'+'.code -> { min = 1; max = Double.POSITIVE_INFINITY; i++ }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in quantified no longer advances past the consumed character (`'+'.code -> { min = 1; max = Double.POSITIVE_INFINITY; i++ }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "quantified",
+  "text": "'?'.code -> { min = 0; max = 1.0; i++ }",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "the parser cursor in quantified no longer advances past the consumed character (`'?'.code -> { min = 0; max = 1.0; i++ }`: Replaced integer addition with subtraction): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "readAtom",
+  "text": "i++",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "the parser cursor in readAtom no longer advances past the consumed character (`i++`: Substituted 1 with 0): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "readAtom",
+  "text": "i++",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "the parser cursor in readAtom no longer advances past the consumed character (`i++`: Removed assignment to member variable i): the enclosing parse loop re-reads the same position (or walks back over it) and appends nodes / characters without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Authorize.kt",
+  "method": "show",
+  "text": "Character.isHighSurrogate(c) && i + 1 < s.length && Character.isLowSurrogate(s[i + 1]) -> { sb.append(c).append(s[i + 1]); i++ }",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "show()'s cursor `i` no longer advances (removed / reversed increment): the while loop re-reads the same character for ever and the StringBuilder grows without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Authorize.kt",
+  "method": "show",
+  "text": "i++",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "show()'s cursor `i` no longer advances (removed / reversed increment): the while loop re-reads the same character for ever and the StringBuilder grows without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs, -Xmx1500m), so the OutOfMemoryError is the mutant's own unbounded allocation."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Pca.kt",
+  "method": "pathShape$pca_kotlin_mutation",
+  "text": "while (k * 2 < n) k *= 2",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 2 with 3",
+  "reason": "`k *= 3` overshoots: k can reach n or above, the following `idx < k` then sets n = k with the same idx for ever and `out.add(\"R\")` appends without end until the heap is exhausted. The unmutated code halves toward the leaf and ends; it passes the same tests in the same minion heap (PIT's green-suite coverage run uses the pom's jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Pca.kt",
+  "method": "pathShape$pca_kotlin_mutation",
+  "text": "var k = 1L",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 2",
+  "reason": "`var k = 2L`: at n = 2, `k * 2 < n` is false, so k stays 2. With idx < k the branch sets n = k = 2 and `out.add` appends for ever (with idx >= k, n drops to 0 and the loop ends). The unmutated k starts at 1, so k < n and n shrinks on every pass."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Json.kt",
+  "method": "hex4",
+  "text": "i += 4",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "`i += 4` becomes `i -= 4`: the cursor lands before the `\\u` escape it has just read, so str() re-reads that escape and appends to its StringBuilder without end. Unmutated, the cursor moves past the four digits."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Json.kt",
+  "method": "str",
+  "text": "val c = s[i++]",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 0",
+  "reason": "`val c = s[i++]` with the cursor no longer advancing: the same non-quote character is read for ever and `sb.append(c)` grows without end. Unmutated, i advances on every pass and the input is bounded."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Json.kt",
+  "method": "str",
+  "text": "val c = s[i++]",
+  "mut": "MemberVariableMutator",
+  "desc": "Removed assignment to member variable i",
+  "reason": "`val c = s[i++]` with the cursor no longer advancing: the same non-quote character is read for ever and `sb.append(c)` grows without end. Unmutated, i advances on every pass and the input is bounded."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Predicates.kt",
+  "method": "parseGlob",
+  "text": "i++",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "the final `i++` of the parse loop is removed: the loop re-reads the same character and `out.add` appends without end for any literal or `?`. Unmutated, i advances on every pass."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "atom",
+  "text": "'[' -> return cls()",
+  "mut": "NonVoidMethodCallMutator",
+  "desc": "removed call to net/atlasauth/pca/verifier/SafeRegex$Parser::cls",
+  "reason": "`'[' -> return cls()` with the call removed returns without consuming the `[`: the enclosing cat() loop stays at the same position and `items.add` appends without end. Unmutated, cls() consumes the class or throws."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "SafeRegex.kt",
+  "method": "cat",
+  "text": "while (i < s.length && s[i] != '|' && s[i] != ')') items.add(quantified())",
+  "mut": "NonVoidMethodCallMutator",
+  "desc": "removed call to net/atlasauth/pca/verifier/SafeRegex$Parser::quantified",
+  "reason": "`items.add(quantified())` with the parse call removed consumes nothing: i stays put, the `while` condition stays true and `items.add` appends without end. Unmutated, quantified() consumes at least one character or throws."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Actions.kt",
+  "method": "packProof",
+  "text": "seg = seg.subList(0, k)",
+  "mut": "NakedReceiverMutator",
+  "desc": "replaced call to java/util/List::subList with receiver",
+  "reason": "`seg = seg.subList(0, k)` becomes `seg = seg`: seg never shrinks and idx < k still holds, so `while (seg.size > 1)` never exits and `path.add` appends without end. Unmutated, seg strictly shrinks."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Sigstore.kt",
+  "method": "kids$pca_kotlin_mutation",
+  "text": "o = c.end",
+  "mut": "NonVoidMethodCallMutator",
+  "desc": "removed call to net/atlasauth/pca/verifier/Sigstore$Tlv::getEnd",
+  "reason": "`o = c.end` with the call removed assigns 0: the cursor returns to the start of the buffer, re-reads the same TLV and `out.add` appends without end while that TLV fits under t.end. Unmutated, o strictly grows, because every TLV has a header."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestNvidiaCollateral.kt",
+  "method": "checkChainOcsp",
+  "text": "for (i in 0 until last) statuses[i] = \"absent\"",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "the loop index no longer reaches `last` (it walks down, or the exit test is forced to continue), so `statuses[i] = \"absent\"` adds a new HashMap key on every pass until the heap is gone. Unmutated, it runs chain.size - 1 times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestNvidiaCollateral.kt",
+  "method": "checkChainOcsp",
+  "text": "for (i in 0 until last) statuses[i] = \"absent\"",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the loop index no longer reaches `last` (it walks down, or the exit test is forced to continue), so `statuses[i] = \"absent\"` adds a new HashMap key on every pass until the heap is gone. Unmutated, it runs chain.size - 1 times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestNvidiaCollateral.kt",
+  "method": "kids",
+  "text": "p = k.end",
+  "mut": "NonVoidMethodCallMutator",
+  "desc": "removed call to net/atlasauth/pca/verifier/AttestNvidiaCollateral$ONode::getEnd",
+  "reason": "`p = k.end` with the call removed assigns 0: the cursor returns to the start of the buffer, re-reads the same node and `out.add` appends without end while that node fits under n.end. Unmutated, p strictly grows, because every node has a header."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestCert.kt",
+  "method": "kids",
+  "text": "p = k.end",
+  "mut": "NonVoidMethodCallMutator",
+  "desc": "removed call to net/atlasauth/pca/verifier/AttestCert$Elem::getEnd",
+  "reason": "`p = k.end` with the call removed assigns 0: the cursor returns to the start of the buffer, re-reads the same element and `out.add` appends without end while that element fits under e.end. Unmutated, p strictly grows, because every element has a header."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestXml.kt",
+  "method": "parseStartTag",
+  "text": "if (i + 1 < rest.length && rest[i + 1] == '>') return StartTag(node, true, i + 2)",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "`i + 2` becomes `i - 2`, and the caller does `i += st.consumed`. For a self-closing tag with a one-character name and no attributes (`<a/>`), `rest` has i = 1, so consumed is -1 and the outer cursor moves back. The outer loop reads that tag again and `cur.children.add(node)` appends on every pass, because a self-closing tag leaves `cur` unchanged. Unmutated, consumed is at least 3 and the cursor strictly advances."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "StoreConformance.kt",
+  "method": "race",
+  "text": "for (i in 0 until n) {",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the `for (i in 0 until n)` exit test is forced to continue, so `ts.add(Thread { ... })` appends without end before any thread starts. Unmutated, it runs n times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "StoreConformance.kt",
+  "method": "runOperationStore$lambda$60",
+  "text": "for (j in 0 until handles) hs.add(handle())",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "the `for (j in 0 until handles)` index no longer reaches `handles` (it walks down, or the exit test is forced to continue), so `hs.add(handle())` opens and keeps a new handle on every pass. Unmutated, it runs `handles` times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "StoreConformance.kt",
+  "method": "runOperationStore$lambda$60",
+  "text": "for (j in 0 until handles) hs.add(handle())",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the `for (j in 0 until handles)` index no longer reaches `handles` (it walks down, or the exit test is forced to continue), so `hs.add(handle())` opens and keeps a new handle on every pass. Unmutated, it runs `handles` times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "StoreConformance.kt",
+  "method": "runStateStore$lambda$17",
+  "text": "for (j in 0 until handles) hs.add(handle())",
+  "mut": "IncrementsMutator",
+  "desc": "Changed increment from 1 to -1",
+  "reason": "the `for (j in 0 until handles)` index no longer reaches `handles` (it walks down, or the exit test is forced to continue), so `hs.add(handle())` opens and keeps a new handle on every pass. Unmutated, it runs `handles` times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "StoreConformance.kt",
+  "method": "runStateStore$lambda$17",
+  "text": "for (j in 0 until handles) hs.add(handle())",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the `for (j in 0 until handles)` index no longer reaches `handles` (it walks down, or the exit test is forced to continue), so `hs.add(handle())` opens and keeps a new handle on every pass. Unmutated, it runs `handles` times."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Pca.kt",
+  "method": "pathShape$pca_kotlin_mutation",
+  "text": "while (k * 2 < n) k *= 2",
+  "mut": "ConditionalsBoundaryMutator",
+  "desc": "changed conditional boundary",
+  "reason": "`while (k * 2 <= n)`: for n = 2 k ends at 2, and idx < size = 2 takes the `idx < k` arm, which sets n = k = 2. The outer `while (n > 1)` then repeats with the same n, so `out.add(\"R\")` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Json.kt",
+  "method": "str",
+  "text": "when (val e = s[i++]) {",
+  "mut": "MathMutator",
+  "desc": "Replaced integer addition with subtraction",
+  "reason": "`s[i++]` on the escape letter turned into `s[i--]`: after a valid escape i points back at the backslash, which is read again, so the same escape is decoded and appended to `sb` without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "IntentAcc.kt",
+  "method": "monitorStates$pca_kotlin_mutation",
+  "text": "for (i in 1..w) out.add(\"pending:$i\")",
+  "mut": "InlineConstantMutator",
+  "desc": "Substituted 1 with 2",
+  "reason": "`for (i in 1..w)` compiles to i = 1; while (true) { body; if (i == w) break; i += 1 }: the step 1 with 2 gives i = 1, 3, 5, ..., which never equals an even w, so `out.add(\"pending:$i\")` appends without end. The other 1, the start, cannot do this: from 2 the loop still exits at i == w. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "AttestDer.kt",
+  "method": "oidToDotted",
+  "text": "for (i in 1 until arcs.size) parts.add(arcs[i].toString())",
+  "mut": "RemoveIncrementsMutator",
+  "desc": "Removed increment 1",
+  "reason": "`for (i in 1 until arcs.size)` without the i++: every OID has at least two arcs, i stays 1 < size, so `parts.add(...)` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Pca.kt",
+  "method": "pathShape$pca_kotlin_mutation",
+  "text": "while (n > 1) {",
+  "mut": "NegateConditionalsMutator",
+  "desc": "negated conditional",
+  "reason": "the `while (n > 1)` test negated: at n = 1 (size 1, or n reached 1) k = 1 and `k * 2 < n` is false; with idx < k the arm sets n = k = 1, and otherwise idx -= 1, n -= 1 reaches n <= 0 where k stays 1 and the arm repeats. The loop never leaves, so `out.add(...)` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ },
+ {
+  "st": "MEMORY_ERROR",
+  "file": "Pca.kt",
+  "method": "pathShape$pca_kotlin_mutation",
+  "text": "while (n > 1) {",
+  "mut": "RemoveConditionalMutator_ORDER_IF",
+  "desc": "removed conditional - replaced comparison check with true",
+  "reason": "the `while (n > 1)` test forced true: at n = 1 (size 1, or n reached 1) k = 1 and `k * 2 < n` is false; with idx < k the arm sets n = k = 1, and otherwise idx -= 1, n -= 1 reaches n <= 0 where k stays 1 and the arm repeats. The loop never leaves, so `out.add(...)` appends without end. The unmutated code passes the same tests in the same minion heap (PIT's green-suite run uses the same jvmArgs)."
+ }
+]

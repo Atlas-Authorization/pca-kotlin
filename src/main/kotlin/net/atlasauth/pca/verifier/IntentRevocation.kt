@@ -29,10 +29,10 @@ object IntentRevocation {
         return x.toString()
     }
 
-    private fun bindRoot(size: Any?, treeRoot: String): String =
+    internal fun bindRoot(size: Any?, treeRoot: String): String =
         Pca.b64(Pca.sha(REVSET_PREFIX, IntentJs.canonBytes(linkedMapOf<String, Any?>("size" to size, "tree" to treeRoot))))
 
-    private val EMPTY_TREE = Pca.b64(Pca.sha(ByteArray(0)))
+    internal val EMPTY_TREE = Pca.b64(Pca.sha(ByteArray(0)))
 
     /**
      * `revset_root(L)`: `base64url(SHA-256("pca-revset/v1\0" || canonical({size: |L|, tree})))` over the RFC 6962 Merkle root
