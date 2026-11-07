@@ -114,7 +114,8 @@ object OracleFacts {
             if ("sub" != r["fn"] && "ratio_ppm" != r["fn"]) return "relational '$n': fn must be \"sub\" or \"ratio_ppm\""
             for (op in listOf(r["a"], r["b"])) {
                 var ok = IntentArtifacts.isParamPath(op)
-                if (!ok && op is String && op.startsWith("env.world.")) {
+                // an action.params path never starts with env.world., so ok is still false here
+                if (op is String && op.startsWith("env.world.")) {
                     val rest = op.substring("env.world.".length)
                     ok = rest in names && rest != n
                 }
