@@ -119,8 +119,8 @@ class IntentV2KillTest {
         fun ctx(vararg over: Any?): LinkedHashMap<String, Any?> = jm("params", params(), "schema", jm("docs", jl(SCHEMA), "keys", KEYS), "session", jm("root", S, "grants", jl()),
             "acc", jm("state", jm("trip_spend", jm("sum", 0L)), "monitors", jm())).also { it.putAll(jm(*over)) }
         fun verify(grant: Map<String, Any?>, p: Map<String, Any?>, ctx: Any?): Pca.Verdict =
-            Pca.verifyPcactn(p, grant, NOW, Pca.Audience.Of(AUD), null, null, IntentV2.Context.fromJson(ctx))
-        val CORE = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter", "intent")
+            Pca.verifyPcactn(p, grant, NOW, Pca.Audience.Of(AUD), null, null, IntentV2.Context.fromJson(ctx), insecureSkipPlanRootCheck = true)
+        val CORE = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format", "intent")
         fun keys(vararg extra: String): List<String> = CORE + extra
         fun failed(v: Pca.Verdict): List<String> = v.checks.filter { !it.value }.keys.toList()
     }
@@ -141,7 +141,7 @@ class IntentV2KillTest {
         val v = verify(G0, plain, ctx())
         assertEquals(CORE, v.checks.keys.toList())
         assertEquals(listOf("intent"), failed(v))
-        assertEquals(CORE, Pca.verifyPcactn(plain, G0, NOW, Pca.Audience.Of(AUD), null, null, null).checks.keys.toList())
+        assertEquals(CORE, Pca.verifyPcactn(plain, G0, NOW, Pca.Audience.Of(AUD), null, null, null, insecureSkipPlanRootCheck = true).checks.keys.toList())
         val req = verify(G0, plain, ctx("policy", jm("session", jm("require", true))))
         assertEquals(keys("intent_session"), req.checks.keys.toList())
         assertEquals(listOf("intent", "intent_session"), failed(req))
@@ -154,7 +154,7 @@ class IntentV2KillTest {
         assertEquals(listOf("intent", "schema", "intent_session"), failed(verify(G0, plain, ctx("policy", jm("extra", true)))))
         assertEquals(listOf("intent", "schema", "intent_session"), failed(verify(G0, plain, ctx("policy", jm("session", jm("reqiure", true))))))
         assertEquals(listOf("schema", "intent_session", "accumulators"), failed(verify(G0, build(G0, "salt0", MAP0, is0(), params(), REF), ctx("params", null))))
-        assertEquals(listOf("intent", "schema", "intent_session"), failed(Pca.verifyPcactn(plain, G0, NOW, Pca.Audience.Of(AUD), null, null, IntentV2.Context.fromJson(null))))
+        assertEquals(listOf("intent", "schema", "intent_session"), failed(Pca.verifyPcactn(plain, G0, NOW, Pca.Audience.Of(AUD), null, null, IntentV2.Context.fromJson(null), insecureSkipPlanRootCheck = true)))
         val cw = verify(G0, plain, ctx("policy", jm("schema", jm("closed_world", true))))
         assertEquals(keys("schema"), cw.checks.keys.toList())
         assertEquals(listOf("intent"), failed(cw))

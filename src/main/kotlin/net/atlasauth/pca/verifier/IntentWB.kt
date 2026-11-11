@@ -123,7 +123,7 @@ object IntentWB {
     fun active(input: Any?): BooleanArray {
         val inp = IntentJs.obj(IntentJs.normalize(input))
         val s = IntentJs.opt(inp, "intent_session", LinkedHashMap<String, Any?>())
-        val p = IntentJs.opt(inp, "policy", LinkedHashMap<String, Any?>())
+        val p = IntentJs.get(inp, "policy") // only read through IntentJs.get / opt, where absent and {} agree
         val committed = LinkedHashMap<String, Any?>()
         if (IntentJs.own(s, "facts")) committed["facts"] = IntentJs.get(s, "facts")
         if (IntentJs.own(s, "offer_set")) committed["offer_set"] = IntentJs.get(s, "offer_set")
@@ -141,7 +141,6 @@ object IntentWB {
         out.reason = reason
         out.world = null
         out.prov = null
-        out.cls = null
         out.friction = null
         out.singleSource = null
         return out

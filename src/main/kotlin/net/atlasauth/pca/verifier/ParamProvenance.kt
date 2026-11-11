@@ -223,7 +223,7 @@ object ParamProvenance {
                 for (refO in provMap[p] as List<*>) {
                     val ref = refO as String
                     if (!ref.startsWith(LABEL_REF_PREFIX)) {
-                        val r = if (reg.containsKey(ref) && isTaintLevel(reg[ref])) rank(reg[ref]) else 4
+                        val r = rank(reg[ref]) // an unregistered ref or a non-level value ranks 4
                         join = maxOf(join, r)
                         continue
                     }
