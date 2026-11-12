@@ -25,6 +25,14 @@ on:
         description: 'ignore any baseline history: mutate everything'
         type: boolean
         default: false
+      only:
+        description: 'Experiment: run only these shards (comma-separated); the merge stays red'
+        type: string
+        default: ''
+      oom_control:
+        description: 'Negative control: only Kill06OomControlTest runs, and a mutant it catches dies of a real OutOfMemoryError. The gate must refuse it.'
+        type: boolean
+        default: false
   push:
     branches: ['ci/**']
 
@@ -37,37 +45,72 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
+# the old 8-shard plan's "rest" shard hit the job time limit (run 41590828658), so it is split by source file below; ActionVectorsTest replays the shared vectors (flagship layout).
 env:
   CRATE: kotlin-pca
-  SHARDS: '8'
+  SHARDS: '20'
   P: net.atlasauth.pca.verifier
+  # Maven Central answers HTTP 429 when many shards start together: wait and retry instead of losing the shard
+  MAVEN_ARGS: -Daether.transport.http.retryHandler.count=8 -Daether.transport.http.retryHandler.interval=15000
 
 jobs:
   shard:
-    name: shard ${{ matrix.shard }}/8 (${{ matrix.classes }})
+    name: shard ${{ matrix.shard }}/20 (${{ matrix.classes }})
     runs-on: ubuntu-latest
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 64 # Enterprise plan: 500 concurrent jobs org-wide; 9 lanes x 64 stays under it with room for CI and merge jobs
       matrix:
         include:
           - { shard: 1, classes: 'Pca' }
           - { shard: 2, classes: 'Pca$*' }
           - { shard: 3, classes: 'Json*,Threshold*' }
-          - { shard: 4, classes: 'Pq*,Caveats*' }
+          - { shard: 4, classes: 'Pq*,Caveats*,CaveatLang*' }
           - { shard: 5, classes: 'IntentV2*,IntentAcc*' }
           - { shard: 6, classes: 'IntentMap*,IntentSession*,IntentRevocation*,IntentJs*,IntentClassifier*,IntentWB*,IntentArtifacts*' }
           - { shard: 7, classes: 'SafeRegex*,Predicates*' }
-          - { shard: 8, classes: 'rest' }
+          - { shard: 8, classes: 'Authorize*' }
+          - { shard: 9, classes: 'Actions*' }
+          - { shard: 10, classes: 'Sigstore*,Mesh*' }
+          - { shard: 11, classes: 'AttestIntel*,AttestNvidia*' }
+          - { shard: 12, classes: 'AttestCert*,AttestDer*,AttestUtil*,AttestXml*' }
+          - { shard: 13, classes: 'AttestJws*,AttestMaa*,AttestGcp*,AttestAmd*,Attest,Attest$*' }
+          - { shard: 14, classes: 'ActionSchema*,ArgProvenance*,ParamProvenance*,ProvenanceGate*' }
+          - { shard: 15, classes: 'OracleFacts*,Operations*,Issue*,Workflow*,Undo*' }
+          - { shard: 16, classes: 'Approval*,Assurance*,PlanLifecycle*,PolicyAuthoring*,Revocation*,ReadVault*,ReadSide*' }
+          - { shard: 17, classes: 'StoreConformance*,PcaJdbcStateStore*,PcaDecision*,Ledger*,GrantResource*,AtomicKv*,Lease*,Optimistic*,Bundle*' }
+          - { shard: 18, classes: 'rest' }
+          - { shard: 19, classes: 'surface' }
+          - { shard: 20, classes: 'Prohibitions*,Contracts*,ContractEnforcer*,ForbidWins*' }
     steps:
+      - name: Shard filter
+        if: ${{ inputs.only != '' }}
+        env:
+          ONLY: ${{ inputs.only }}
+        run: case ",$ONLY," in *,${{ matrix.shard }},*) ;; *) echo "::notice::not in this experiment"; exit 1 ;; esac
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
+        id: jdk
+        continue-on-error: true  # a transient download failure must not leave the later steps on the runner's default JDK
         with:
           distribution: temurin
           # 23, not 21: LESS runs through the FFM API (JDK 22+). On 21 LessNative never loaded, so its mutants and every
           # LESS branch of Pq were NO_COVERAGE or survived untested (ci.yml runs the same pom on 23 with --less)
           java-version: '23'
           cache: maven
+      - name: JDK 23 again from another vendor when the first setup failed
+        if: steps.jdk.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '23'
+          cache: maven
+      - name: The job runs on JDK 23 (the Kotlin compiler of the pom rejects the runner's default JDK 25 version string)
+        shell: bash
+        run: |
+          java -version 2>&1
+          java -version 2>&1 | grep -q 'version "23' || { echo "::error::JDK 23 is not the active JDK"; exit 1; }
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -96,27 +139,68 @@ jobs:
             fi
           done
           echo "::notice::shard $SHARD: no baseline PIT history found, full run (seeds the history for the next run)"
+      # Targeted runs re-decide every mutant no test killed: PIT reuses a TIMED_OUT / RUN_ERROR / MEMORY_ERROR line from the history of an
+      # unchanged class, and a SURVIVED one unless a covering test CHANGED (a brand-new kill-test class does not count), so new kill tests would never get to try them. Dropping those lines makes PIT run them again (SURVIVED
+      # ones re-run by themselves when a covering test changed; changed classes re-run whole).
+      - name: Re-decide timeouts and run errors from the baseline
+        if: ${{ env.PIT_HISTORY_IN != '' }}
+        run: |
+          python3 - "$PIT_HISTORY_IN" "$RUNNER_TEMP/pit-history-in/pit-history-redecide.txt" <<'REDECIDE'
+          import base64, binascii, sys
+          BAD = (b"TIMED_OUT", b"RUN_ERROR", b"MEMORY_ERROR", b"SURVIVED", b"NO_COVERAGE")
+          def undecided(l):
+              try: d = base64.b64decode(l.strip(), validate=True)
+              except (binascii.Error, ValueError): return False
+              return any(b in d for b in BAD)
+          lines = open(sys.argv[1]).readlines()
+          keep = [l for l in lines if not undecided(l)]
+          print(f"baseline history: {len(lines)} lines, {len(lines) - len(keep)} undecided lines (timeout / run error / survived / no coverage) dropped for a fresh decision")
+          open(sys.argv[2], "w").writelines(keep)
+          REDECIDE
+          echo "PIT_HISTORY_IN=$RUNNER_TEMP/pit-history-in/pit-history-redecide.txt" >> "$GITHUB_ENV"
       - name: Mutate
         working-directory: ${{ env.MONO }}/sdks/kotlin-pca
         env:
           CLASSES: ${{ matrix.classes }}
           JDK_JAVA_OPTIONS: --enable-native-access=ALL-UNNAMED
+          PCA_OOM_CONTROL: ${{ inputs.oom_control && '1' || '' }}
         run: |
           # the shard's class set replaces the pom's targetClasses (an explicit pom setting wins over -DtargetClasses)
           python3 - <<'PY'
           import os, re
           p, c = os.environ["P"], os.environ["CLASSES"]
-          shards = ["Pca", "Pca$*", "Json*,Threshold*", "Pq*,Caveats*", "IntentV2*,IntentAcc*",
+          shards = ["Pca", "Pca$*", "Json*,Threshold*", "Pq*,Caveats*,CaveatLang*", "IntentV2*,IntentAcc*",
                     "IntentMap*,IntentSession*,IntentRevocation*,IntentJs*,IntentClassifier*,IntentWB*,IntentArtifacts*",
-                    "SafeRegex*,Predicates*"]
+                    "SafeRegex*,Predicates*",
+                    "Authorize*",
+                    "Actions*",
+                    "Sigstore*,Mesh*",
+                    "AttestIntel*,AttestNvidia*",
+                    "AttestCert*,AttestDer*,AttestUtil*,AttestXml*",
+                    "AttestJws*,AttestMaa*,AttestGcp*,AttestAmd*,Attest,Attest$*",
+                    "ActionSchema*,ArgProvenance*,ParamProvenance*,ProvenanceGate*",
+                    "OracleFacts*,Operations*,Issue*,Workflow*,Undo*",
+                    "Approval*,Assurance*,PlanLifecycle*,PolicyAuthoring*,Revocation*,ReadVault*,ReadSide*",
+                    "StoreConformance*,PcaJdbcStateStore*,PcaDecision*,Ledger*,GrantResource*,AtomicKv*,Lease*,Optimistic*,Bundle*",
+                    "Prohibitions*,Contracts*,ContractEnforcer*,ForbidWins*"]
+          surface = "".join(f"<param>net.atlasauth.pca.{d}.*</param>" for d in ("stepup", "guard", "ktor", "spring"))
           par = lambda xs: "".join(f"<param>{p}.{x}</param>" for x in xs)
           if c == "rest":
               block = f"<targetClasses><param>{p}.*</param></targetClasses><excludedClasses>{par(','.join(shards).split(','))}</excludedClasses>"
+          elif c == "surface":
+              block = f"<targetClasses>{surface}</targetClasses>"
           else:
               block = f"<targetClasses>{par(c.split(','))}</targetClasses>"
           s = open("pom.xml").read()
           s2 = re.sub(r"<targetClasses>.*?</targetClasses>", lambda m: block, s, count=1, flags=re.S)
           assert s2 != s, "targetClasses not found in pom.xml"
+          # the verifier shards keep the verifier tests; the surface's own tests decide its mutants
+          tests = surface if c == "surface" else f"<param>{p}.*</param>"
+          s2, n = re.subn(r"<targetTests>.*?</targetTests>", lambda m: f"<targetTests>{tests}</targetTests>", s2, count=1, flags=re.S)
+          assert n == 1, "targetTests not found in pom.xml"
+          if os.environ.get("PCA_OOM_CONTROL") == "1":
+              s2, n = re.subn(r"<targetTests>.*?</targetTests>", f"<targetTests><param>{p}.Kill06OomControlTest</param></targetTests>", s2, count=1, flags=re.S)
+              assert n == 1, "targetTests not found in pom.xml"
           open("pom.xml", "w").write(s2)
           print(block)
           PY
@@ -124,24 +208,132 @@ jobs:
           hist=(-DhistoryOutputFile="$RUNNER_TEMP/pit-history-out/pit-history.txt")
           mkdir -p "$RUNNER_TEMP/pit-history-out"
           [ -n "${PIT_HISTORY_IN:-}" ] && hist+=(-DhistoryInputFile="$PIT_HISTORY_IN")
-          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=4 -DtimestampedReports=false "${hist[@]}" | tail -40
+          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=4 -DmutationUnitSize=1 -DtimestampedReports=false -Dverbose=true "${hist[@]}" 2>&1 | tee "$RUNNER_TEMP/pit.log" | tail -40
+          # one minion JVM per mutant (PIT otherwise reuses a JVM across mutants, so a fixture or main-code cache first filled under a mutant
+          # outlives it and fails every later mutant's tests): the JVM starts (one 'Heap Max Capacity' line each) are about the mutant count
+          echo "minion JVMs started in pass 1: $(grep -ac 'Heap Max Capacity' "$RUNNER_TEMP/pit.log"); $(grep -aoE 'Generated [0-9]+ mutations' "$RUNNER_TEMP/pit.log" | tail -1)"
+          # A timeout is decided again at DOUBLE the limit, so only a second timeout counts (BRIEF: timeouts are not kills). The history
+          # without its TIMED_OUT lines makes PIT re-run exactly those (PIT reuses a TIMED_OUT from history, and KILLED / SURVIVED of
+          # unchanged classes); RUN_ERROR / MEMORY_ERROR re-run too. The second report replaces the first, so its statuses count.
+          OOMLOG="$RUNNER_TEMP/pit.log"
+          X1="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+          if [ -n "$X1" ] && grep -qE "status=.TIMED_OUT." "$X1"; then
+            echo "$(grep -cE "status=.TIMED_OUT." "$X1") TIMED_OUT: re-running them at double the limit"
+            python3 - "$RUNNER_TEMP/pit-history-out/pit-history.txt" "$RUNNER_TEMP/pit-history-retry.txt" <<'RETRY'
+          import base64, binascii, sys
+          def timed_out(l):
+              try: return b"TIMED_OUT" in base64.b64decode(l.strip(), validate=True)
+              except (binascii.Error, ValueError): return False
+          lines = open(sys.argv[1]).readlines()
+          keep = [l for l in lines if not timed_out(l)]
+          print(f"history: {len(lines)} lines, {len(lines) - len(keep)} TIMED_OUT dropped")
+          open(sys.argv[2], "w").writelines(keep)
+          RETRY
+            sed -i -e 's#<timeoutFactor>3.0</timeoutFactor>#<timeoutFactor>6.0</timeoutFactor>#' -e 's#<timeoutConstant>15000</timeoutConstant>#<timeoutConstant>30000</timeoutConstant>#' pom.xml
+            grep -q '<timeoutFactor>6.0</timeoutFactor>' pom.xml && grep -q '<timeoutConstant>30000</timeoutConstant>' pom.xml || { echo "::error::could not double the PIT timeout"; exit 1; }
+            mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=4 -DmutationUnitSize=1 -DtimestampedReports=false -Dverbose=true \
+              -DhistoryInputFile="$RUNNER_TEMP/pit-history-retry.txt" -DhistoryOutputFile="$RUNNER_TEMP/pit-history-out/pit-history.txt" 2>&1 | tee "$RUNNER_TEMP/pit2.log" | tail -40
+            X2="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+            echo "after the retry: $(grep -cE "status=.TIMED_OUT." "$X2" || true) TIMED_OUT"
+            OOMLOG="$RUNNER_TEMP/pit2.log"   # the run-error statuses that count are the second run's
+          fi
+          # MEMORY_ERROR is PIT's watchdog (90% of a pool) as often as a real exhaustion, and the watchdog fires on mutants that cannot allocate
+          # (proven equivalents that run every covering test). A MEMORY_ERROR therefore decides nothing yet: each one is re-run ONCE on its own
+          # (threads 1, every other mutant reused from the history) in a fresh minion with a much larger heap, and THAT result counts: killed,
+          # survived (the equivalent ledger applies) or still a run error (it then needs its proof). Both results are logged and uploaded.
+          XM="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+          if [ -n "$XM" ] && grep -qE "status=.MEMORY_ERROR." "$XM"; then
+            cp "$XM" "$RUNNER_TEMP/memerr-before.xml"
+            echo "$(grep -cE "status=.MEMORY_ERROR." "$XM") MEMORY_ERROR: re-running them alone with a 10 GB heap"
+            python3 - "$RUNNER_TEMP/pit-history-out/pit-history.txt" "$RUNNER_TEMP/pit-history-mem.txt" <<'MEMRETRY'
+          import base64, binascii, sys
+          def undecided(l):
+              try: d = base64.b64decode(l.strip(), validate=True)
+              except (binascii.Error, ValueError): return False
+              return b"MEMORY_ERROR" in d or b"RUN_ERROR" in d
+          lines = open(sys.argv[1]).readlines()
+          keep = [l for l in lines if not undecided(l)]
+          print(f"history: {len(lines)} lines, {len(lines) - len(keep)} MEMORY_ERROR / RUN_ERROR dropped")
+          open(sys.argv[2], "w").writelines(keep)
+          MEMRETRY
+            sed -i -e 's#<timeoutFactor>3.0</timeoutFactor>#<timeoutFactor>6.0</timeoutFactor>#' -e 's#<timeoutConstant>15000</timeoutConstant>#<timeoutConstant>30000</timeoutConstant>#' -e 's#<arg>-Xmx3000m</arg>#<arg>-Xmx10000m</arg>#' pom.xml
+            grep -q '<arg>-Xmx10000m</arg>' pom.xml && grep -q '<timeoutFactor>6.0</timeoutFactor>' pom.xml || { echo "::error::could not set up the MEMORY_ERROR re-run"; exit 1; }
+            mvn -B -ntp org.pitest:pitest-maven:mutationCoverage -Dthreads=1 -DmutationUnitSize=1 -DtimestampedReports=false -Dverbose=true \
+              -DhistoryInputFile="$RUNNER_TEMP/pit-history-mem.txt" -DhistoryOutputFile="$RUNNER_TEMP/pit-history-out/pit-history.txt" 2>&1 | tee "$RUNNER_TEMP/pit3.log" | tail -40
+            XA="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
+            BEFORE="$RUNNER_TEMP/memerr-before.xml" AFTER="$XA" node -e '
+              const fs = require("fs");
+              const rows = (f) => { const m = new Map(); for (const x of fs.readFileSync(f, "utf8").matchAll(/<mutation\b([^>]*)>([\s\S]*?)<\/mutation>/g)) { const t = (n) => (new RegExp("<" + n + ">([\\s\\S]*?)</" + n + ">").exec(x[2]) || [, ""])[1]; const st = (/status=.([A-Z_]+)./.exec(x[1]) || [])[1]; m.set([t("mutatedClass"), t("mutatedMethod"), t("index"), t("mutator"), t("lineNumber")].join("|"), { st, desc: t("description") }); } return m; };
+              const b = rows(process.env.BEFORE), a = rows(process.env.AFTER); const out = [];
+              for (const [k, v] of b) if (v.st === "MEMORY_ERROR") out.push({ mutant: k, desc: v.desc, before: v.st, after: (a.get(k) || {}).st || "missing" });
+              fs.writeFileSync(process.env.GITHUB_WORKSPACE + "/memerr-rerun-${{ matrix.shard }}.json", JSON.stringify(out, null, 1));
+              for (const r of out) console.log(`MEMORY_ERROR re-run: ${r.mutant} (${r.desc}): ${r.before} -> ${r.after}`);
+            '
+            OOMLOG="$RUNNER_TEMP/pit3.log"   # the run-error statuses that count are the last run's
+          fi
+          # PIT's watchdog exits a minion at 90% of ANY pool (heap, code cache, ...) and reports MEMORY_ERROR with no real OutOfMemoryError: name the pools
+          grep -oE '[A-Za-z0-9 _'"'"'-]+ has exceeded the shutdown threshold' "$RUNNER_TEMP/pit.log" | sort | uniq -c || true
+          # what the heap held just before each firing: garbage drops at the next GC, real retention does not (the GC lines of all minions interleave)
+          grep -B40 'has exceeded the shutdown threshold' "$RUNNER_TEMP/pit.log" | grep -E 'Pause (Young|Full|Mixed)|shutdown threshold' | tail -150 | cut -c1-160 || true
+          # -XX:+ExitOnOutOfMemoryError ends the minion on a real OutOfMemoryError, so it cannot score as a test's kill: the mutant gets a
+          # run-error status. The merge job ties these counts to those mutants, and any other OutOfMemoryError line fails it.
+          T="$(grep -c 'Terminating due to java.lang.OutOfMemoryError' "$OOMLOG" || true)"
+          # the exception's full name: PIT's verbose log repeats test and flag names
+          # both runs: a non-terminating OutOfMemoryError in either could have scored as a kill
+          cat "$RUNNER_TEMP"/pit*.log | grep java.lang.OutOfMemoryError | grep -v 'Terminating due to java.lang.OutOfMemoryError' > "$RUNNER_TEMP/oom-other.txt" || true
+          head -5 "$RUNNER_TEMP/oom-other.txt" | cut -c1-200
+          echo "{\"terminated\":$T,\"other\":$(wc -l < "$RUNNER_TEMP/oom-other.txt")}" | tee "$GITHUB_WORKSPACE/oom-${{ matrix.shard }}.json"
+          grep -oE '\(([0-9]+)M\) [0-9.]+ms' "$RUNNER_TEMP/pit.log" | grep -oE '[0-9]+M' | sort -n | tail -1 | sed 's/^/largest GC heap capacity: /' || true
       - name: Report
         run: |
           X="$(find "$MONO/sdks/kotlin-pca/target/pit-reports" -name mutations.xml | head -1)"
           [ -n "$X" ] || { echo "::error::no mutations.xml"; exit 1; }
-          node "$MONO/tools/pca-audit/native-mutation/pit-convert.mjs" "$CRATE" "$X" results.json survivors-raw.json
-          node -e '
+          node "$MONO/tools/pca-audit/native-mutation/pit-convert.mjs" "$CRATE" "$X" results.json survivors-raw.json killed-raw.json
+          # KILLED mutants that have a ledger entry (shared ledger or this repo's part file): lets the merge tell an equivalent that a test
+          # killed this run (nondeterministic killer) from a stale entry (stale-killed.mjs); the rest of the killed set stays out of the artifact
+          KR=killed-raw.json MONO="$MONO" node -e '
+            const fs = require("fs");
+            const led = new Set(); const add = (l) => { for (const e of l) if (e.crate === "kotlin-pca") led.add([e.file, e.mutant, e.line.slice(0, 70)].join("\0")); };
+            add(JSON.parse(fs.readFileSync(process.env.MONO + "/tools/pca-audit/native-mutation-equivalents.json", "utf8")).equivalents);
+            const part = process.env.MONO + "/sdks/kotlin-pca/mutation-equivalents.part.json";
+            if (fs.existsSync(part)) add(JSON.parse(fs.readFileSync(part, "utf8")).map((e) => ({ crate: "kotlin-pca", ...e })));
+            const k = JSON.parse(fs.readFileSync(process.env.KR, "utf8")).filter((m) => led.has([m.file, m.mutant, m.line.slice(0, 70)].join("\0")));
+            fs.writeFileSync("killed-equiv-${{ matrix.shard }}.json", JSON.stringify(k));
+          '
+          X="$X" node -e '
             const fs = require("fs"); const r = JSON.parse(fs.readFileSync("results.json", "utf8"));
             const counts = {}; for (const m of r) counts[m.st] = (counts[m.st] || 0) + 1;
             const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map(({ status, ...x }) => x);
+            // for the source guard: package/file of every class this shard mutated
+            const files = new Set();
+            for (const m of fs.readFileSync(process.env.X, "utf8").matchAll(/<sourceFile>([^<]*)<\/sourceFile>\s*<mutatedClass>([^<]*)<\/mutatedClass>/g)) files.add(m[2].split(".").slice(0, -1).join("/") + "/" + m[1]);
+            fs.writeFileSync("mutated-files-${{ matrix.shard }}.json", JSON.stringify([...files]));
             fs.writeFileSync("counts.json", JSON.stringify(counts)); fs.writeFileSync("survivors.json", JSON.stringify(s));
+            // PIT counts MEMORY_ERROR / RUN_ERROR / TIMED_OUT as detected though no test decided them: listed here, the merge job fails on
+            // every one not in the run-error ledger (mutation-run-errors.json, a per-mutant proof that the mutant caused it)
+            const srcOf = (file) => { for (const d of ["src/main/kotlin/net/atlasauth/pca/verifier", "src/main/kotlin/net/atlasauth/pca/stepup", "guard-common", "pca-ktor/src/main/kotlin/net/atlasauth/pca/ktor", "pca-spring/src/main/kotlin/net/atlasauth/pca/spring"]) { const p = process.env.MONO + "/sdks/kotlin-pca/" + d + "/" + file; if (fs.existsSync(p)) return fs.readFileSync(p, "utf8").split("\n"); } return []; };
+            const errs = r.filter((m) => m.st === "MEMORY_ERROR" || m.st === "RUN_ERROR" || m.st === "TIMED_OUT")
+              .map((m) => ({ st: m.st, file: m.file, method: m.method, lineno: m.line, text: (srcOf(m.file)[m.line - 1] ?? "").trim(), mut: m.mut, desc: m.desc }));
+            fs.writeFileSync("run-errors-${{ matrix.shard }}.json", JSON.stringify(errs, null, 1));
+            // a run-error ledger entry whose mutant a test killed THIS run (a hang mutant can end at a deadline test or at the PIT time limit,
+            // depending on timing) is not stale: the merge accepts it when some shard reports that key as KILLED
+            const lk = new Set(JSON.parse(fs.readFileSync(process.env.MONO + "/sdks/kotlin-pca/mutation-run-errors.json", "utf8")).map((e) => [e.file, e.method, e.text, e.mut, e.desc].join(" | ")));
+            const killedKeys = r.filter((m) => m.st === "KILLED").map((m) => [m.file, m.method, (srcOf(m.file)[m.line - 1] ?? "").trim(), m.mut, m.desc].join(" | ")).filter((k) => lk.has(k));
+            fs.writeFileSync("run-error-killed-${{ matrix.shard }}.json", JSON.stringify(killedKeys));
           '
           node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$SHARDS" --tool=pitest \
             --counts=counts.json --survivors=survivors.json --out=shard-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
-          path: shard-${{ matrix.shard }}.json
+          path: |
+            shard-${{ matrix.shard }}.json
+            run-errors-${{ matrix.shard }}.json
+            run-error-killed-${{ matrix.shard }}.json
+            killed-equiv-${{ matrix.shard }}.json
+            memerr-rerun-${{ matrix.shard }}.json
+            mutated-files-${{ matrix.shard }}.json
+            oom-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v4
         with:
           name: pit-history-${{ matrix.shard }}
@@ -165,9 +357,58 @@ jobs:
         with:
           path: reports
       - name: Merge shards and check the ledger
-        run: >
-          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports
-          --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE"
+        # a ledgered equivalent that a test KILLED this run is a notice (nondeterministic killer), not a stale entry: stale-killed.mjs
+        run: |
+          rc=0
+          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports \
+            --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE" > "$RUNNER_TEMP/merge.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/merge.log"
+          node .github/scripts/stale-killed.mjs "$RUNNER_TEMP/merge.log" reports "$rc"
+      # gate honesty: a MEMORY_ERROR / RUN_ERROR / TIMED_OUT mutant ended without any test deciding it (PIT still counts it as detected).
+      # Timeouts are not kills by themselves (BRIEF, Java's rule): timeoutFactor 3 / 15 s in the pom leaves margin for GC pauses.
+      # Each must be in mutation-run-errors.json with a proof that the mutant itself caused it (the unmutated suite passes in
+      # the same minion heap: PIT's green-suite coverage run uses the same jvmArgs); an unlisted one or a stale entry fails.
+      - name: Run errors and timeouts (MEMORY_ERROR / RUN_ERROR / TIMED_OUT) are each proven mutant-caused
+        if: ${{ !cancelled() }}
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const got = []; const errs = {}; const oom = {}; const killed = new Set();
+            const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) { walk(p); continue; } let m; if ((m = /^run-errors-(\d+)\.json$/.exec(e.name))) { const l = JSON.parse(fs.readFileSync(p, "utf8")); errs[m[1]] = l.length; got.push(...l); } else if (/^run-error-killed-\d+\.json$/.test(e.name)) { for (const k of JSON.parse(fs.readFileSync(p, "utf8"))) killed.add(k); } else if ((m = /^oom-(\d+)\.json$/.exec(e.name))) oom[m[1]] = JSON.parse(fs.readFileSync(p, "utf8")); } };
+            walk("reports");
+            const want = Number(process.env.SHARDS), shards = Object.keys(errs).length;
+            const led = JSON.parse(fs.readFileSync(process.env.MONO + "/sdks/kotlin-pca/mutation-run-errors.json", "utf8"));
+            // no status: a proven-unbounded mutant may end at the watchdog or at a real OutOfMemoryError
+            const key = (m) => [m.file, m.method, m.text, m.mut, m.desc].join(" | ");
+            const have = new Map(); for (const m of got) have.set(key(m), (have.get(key(m)) || 0) + 1);
+            let bad = 0; const used = new Set();
+            for (const e of led) {
+              if (!e.reason || String(e.reason).length < 40) { console.error("::error::run-error ledger entry without a proof: " + key(e)); bad++; }
+              const n = have.get(key(e)) || 0, k = e.multiplicity || 1;
+              // a proven-unbounded mutant ends as TIMED_OUT, MEMORY_ERROR or RUN_ERROR, all listed now: any other count is stale or hides one
+              if (n === 0 && killed.has(key(e))) console.log(`::notice::run-error ledger entry whose mutant a test killed this run (not stale, not needed): ${key(e)}`);
+              else if (n === 0) { console.error(`::error::stale run-error ledger entry (no such mutant this run): ${key(e)}`); bad++; }
+              else if (n !== k) { console.error(`::error::run-error ledger entry covers ${k}, the run has ${n}: ${key(e)}`); bad++; }
+              used.add(key(e));
+            }
+            for (const [k, n] of have) if (!used.has(k)) { console.error(`::error::UNPROVEN run error (x${n}), no test decided it: ${k}`); bad++; }
+            // a real OutOfMemoryError is a run error, never a kill: each must be one of the run-error mutants of its own shard, which the checks above require a proof for
+            for (const k of Object.keys(errs)) {
+              const o = oom[k];
+              if (!o) { console.error(`::error::shard ${k} reported no OutOfMemoryError count`); bad++; continue; }
+              if (o.terminated > errs[k]) { console.error(`::error::shard ${k}: ${o.terminated} OutOfMemoryError exit(s) but ${errs[k]} run-error mutant(s)`); bad++; }
+              if (o.other > 0) { console.error(`::error::shard ${k}: ${o.other} OutOfMemoryError line(s) that did not end the minion, so a test may have scored one as a kill`); bad++; }
+            }
+            if (shards !== want) { console.error(`::error::run-error lists from ${shards}/${want} shards (a missing list is a failure)`); bad++; }
+            console.log(`${got.length} MEMORY_ERROR/RUN_ERROR/TIMED_OUT mutant(s) over ${shards} shards, ${led.length} ledger entries, ${bad} problem(s)`);
+            process.exit(bad ? 1 : 0);
+          '
+      - name: Every shipped source file was mutated (recursive)
+        if: ${{ !cancelled() }}
+        run: |
+          G="$MONO/tools/pca-audit/native-mutation/kotlin-source-guard.mjs"
+          node "$G" --self-check
+          node "$G" "$MONO/sdks/kotlin-pca" reports "$SHARDS"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

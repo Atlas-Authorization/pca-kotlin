@@ -23,16 +23,19 @@ object IntentRevocation {
     internal fun jsText(x: Any?, present: Boolean): String {
         if (!present) return "undefined"
         if (x == null) return "null"
-        if (x is Json.Num) return if (x.raw == "-0") "0" else x.raw
+        if (x is Json.Num) { // JS String(Number(raw)): 1e21 prints "1e+21", 1.0 prints "1", -0 prints "0"
+            val d = x.raw.toDouble()
+            return when { d.isNaN() -> "NaN"; d == Double.POSITIVE_INFINITY -> "Infinity"; d == Double.NEGATIVE_INFINITY -> "-Infinity"; else -> Json.esNumber(d) }
+        }
         if (x is List<*>) return x.joinToString(",") { if (it == null) "" else jsText(it, true) }
         if (x is Map<*, *>) return "[object Object]"
         return x.toString()
     }
 
-    private fun bindRoot(size: Any?, treeRoot: String): String =
+    internal fun bindRoot(size: Any?, treeRoot: String): String =
         Pca.b64(Pca.sha(REVSET_PREFIX, IntentJs.canonBytes(linkedMapOf<String, Any?>("size" to size, "tree" to treeRoot))))
 
-    private val EMPTY_TREE = Pca.b64(Pca.sha(ByteArray(0)))
+    internal val EMPTY_TREE = Pca.b64(Pca.sha(ByteArray(0)))
 
     /**
      * `revset_root(L)`: `base64url(SHA-256("pca-revset/v1\0" || canonical({size: |L|, tree})))` over the RFC 6962 Merkle root

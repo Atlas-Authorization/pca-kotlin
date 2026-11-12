@@ -1,0 +1,1234 @@
+{
+ "format": "pca-predicate-reasons/1",
+ "description": "Denial reasons of evaluatePredicates for action pay on r/1, recorded from the TypeScript reference.",
+ "action": {
+  "verb": "pay",
+  "resource": "r/1"
+ },
+ "cases": [
+  {
+   "name": "eq",
+   "predicates": [
+    {
+     "verb": "pay",
+     "resource": "r",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "eq",
+       "value": 5
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 6
+   },
+   "reason": "no predicate permits pay on r/1"
+  },
+  {
+   "name": "ne",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "ne",
+       "value": "a"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "a"
+   },
+   "reason": "k != \"a\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "lt",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lt",
+       "value": 10
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 10
+   },
+   "reason": "amount < 10 not satisfied for pay on r/1"
+  },
+  {
+   "name": "lte",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "value": -100
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 400
+   },
+   "reason": "amount <= -100 not satisfied for pay on r/1"
+  },
+  {
+   "name": "gt",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "gt",
+       "value": 1
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 1
+   },
+   "reason": "amount > 1 not satisfied for pay on r/1"
+  },
+  {
+   "name": "gte",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "gte",
+       "value": true
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 0
+   },
+   "reason": "amount >= true not satisfied for pay on r/1"
+  },
+  {
+   "name": "prefix",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.to",
+       "op": "prefix",
+       "value": "acct_"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "to": "x"
+   },
+   "reason": "to starts with \"acct_\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "like",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.to",
+       "op": "like",
+       "value": "a*"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "to": "x"
+   },
+   "reason": "to like \"a*\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "matches",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.to",
+       "op": "matches",
+       "value": "^a$"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "to": "x"
+   },
+   "reason": "to matches \"^a$\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "is_a",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.to",
+       "op": "is_a",
+       "value": "string"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "to": 1
+   },
+   "reason": "to is a \"string\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "in",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.currency",
+       "op": "in",
+       "value": [
+        "usd",
+        "eur"
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "currency": "gbp"
+   },
+   "reason": "currency in [\"usd\", \"eur\"] not satisfied for pay on r/1"
+  },
+  {
+   "name": "nin",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.currency",
+       "op": "nin",
+       "value": [
+        "usd",
+        1,
+        null,
+        true
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "currency": "usd"
+   },
+   "reason": "currency not in [\"usd\", 1, null, true] not satisfied for pay on r/1"
+  },
+  {
+   "name": "in-nine",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.c",
+       "op": "in",
+       "value": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "c": 10
+   },
+   "reason": "c in [...] not satisfied for pay on r/1"
+  },
+  {
+   "name": "in-eight",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.c",
+       "op": "in",
+       "value": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "c": 10
+   },
+   "reason": "c in [1, 2, 3, 4, 5, 6, 7, 8] not satisfied for pay on r/1"
+  },
+  {
+   "name": "in-nested",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.c",
+       "op": "in",
+       "value": [
+        [
+         1
+        ],
+        {
+         "a": 1
+        },
+        "x"
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "c": 10
+   },
+   "reason": "c in [<value>, <value>, \"x\"] not satisfied for pay on r/1"
+  },
+  {
+   "name": "exists-present",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.memo",
+       "op": "exists"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 1
+   },
+   "reason": "memo present not satisfied for pay on r/1"
+  },
+  {
+   "name": "exists-absent",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.memo",
+       "op": "exists",
+       "value": false
+      }
+     ]
+    }
+   ],
+   "params": {
+    "memo": "x"
+   },
+   "reason": "memo absent not satisfied for pay on r/1"
+  },
+  {
+   "name": "ref",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "ref": "subject.limit"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9
+   },
+   "subject": {
+    "limit": 3
+   },
+   "reason": "amount <= subject.limit not satisfied for pay on r/1"
+  },
+  {
+   "name": "ref-nonstring",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "ref": 5
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9
+   },
+   "reason": "amount <= <ref> not satisfied for pay on r/1"
+  },
+  {
+   "name": "field-other-root",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "env.tier",
+       "op": "eq",
+       "value": "gold"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9
+   },
+   "env": {
+    "tier": "basic"
+   },
+   "reason": "env.tier == \"gold\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "field-params-only",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params",
+       "op": "exists",
+       "value": false
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9
+   },
+   "reason": "action.params absent not satisfied for pay on r/1"
+  },
+  {
+   "name": "long-string",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"...\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-64",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-quote",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "a\"b"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"...\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-backslash",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "a\\b"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"...\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-newline",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "a\nb"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"...\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-emoji",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "a\ud83d\ude00"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"...\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "string-bmp",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": "caf\u00e9"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": "b"
+   },
+   "reason": "k == \"caf\u00e9\" not satisfied for pay on r/1"
+  },
+  {
+   "name": "num-decimal",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "value": 12.5
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 13
+   },
+   "reason": "amount <= <number> not satisfied for pay on r/1"
+  },
+  {
+   "name": "num-big",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "value": 9007199254740993
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9007199254740996
+   },
+   "reason": "amount <= <number> not satisfied for pay on r/1"
+  },
+  {
+   "name": "num-maxsafe",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.amount",
+       "op": "lte",
+       "value": 9007199254740991
+      }
+     ]
+    }
+   ],
+   "params": {
+    "amount": 9007199254740992
+   },
+   "reason": "amount <= 9007199254740991 not satisfied for pay on r/1"
+  },
+  {
+   "name": "value-null",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": null
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "k == null not satisfied for pay on r/1"
+  },
+  {
+   "name": "value-false",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": false
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "k == false not satisfied for pay on r/1"
+  },
+  {
+   "name": "value-object",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq",
+       "value": {
+        "a": 1
+       }
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "k == <value> not satisfied for pay on r/1"
+  },
+  {
+   "name": "value-missing",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "eq"
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "k == <value> not satisfied for pay on r/1"
+  },
+  {
+   "name": "unknown-op",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.k",
+       "op": "zzz",
+       "value": 1
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "k <condition> not satisfied for pay on r/1"
+  },
+  {
+   "name": "field-nonstring",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": 7,
+       "op": "eq",
+       "value": 1
+      }
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "<field> == 1 not satisfied for pay on r/1"
+  },
+  {
+   "name": "cond-nonobject",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      "x"
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "<condition> not satisfied for pay on r/1"
+  },
+  {
+   "name": "cond-array",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      [
+       1
+      ]
+     ]
+    }
+   ],
+   "params": {
+    "k": 1
+   },
+   "reason": "<field> <condition> not satisfied for pay on r/1"
+  },
+  {
+   "name": "all_of",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "all_of": [
+        {
+         "field": "action.params.a",
+         "op": "lte",
+         "value": 10
+        },
+        {
+         "field": "action.params.b",
+         "op": "lte",
+         "value": 5
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 1,
+    "b": 9
+   },
+   "reason": "b <= 5 not satisfied for pay on r/1"
+  },
+  {
+   "name": "all_of-nested",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "all_of": [
+        {
+         "all_of": [
+          {
+           "field": "action.params.a",
+           "op": "lte",
+           "value": 10
+          },
+          {
+           "all_of": [
+            {
+             "field": "action.params.b",
+             "op": "lte",
+             "value": 5
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 1,
+    "b": 9
+   },
+   "reason": "b <= 5 not satisfied for pay on r/1"
+  },
+  {
+   "name": "all_of-depth",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "all_of": [
+        {
+         "all_of": [
+          {
+           "all_of": [
+            {
+             "all_of": [
+              {
+               "all_of": [
+                {
+                 "field": "action.params.b",
+                 "op": "lte",
+                 "value": 5
+                }
+               ]
+              }
+             ]
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "b": 9
+   },
+   "reason": "all of (b <= 5) not satisfied for pay on r/1"
+  },
+  {
+   "name": "any_of",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "any_of": [
+        {
+         "field": "action.params.a",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "action.params.a",
+         "op": "eq",
+         "value": 2
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "any of (a == 1; a == 2) not satisfied for pay on r/1"
+  },
+  {
+   "name": "not",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "not": {
+        "field": "action.params.a",
+        "op": "eq",
+        "value": 3
+       }
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "not (a == 3) not satisfied for pay on r/1"
+  },
+  {
+   "name": "any_of-in-any_of-in-any_of",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "any_of": [
+        {
+         "any_of": [
+          {
+           "any_of": [
+            {
+             "field": "action.params.a",
+             "op": "eq",
+             "value": 1
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "any of (any of ((...))) not satisfied for pay on r/1"
+  },
+  {
+   "name": "not-in-all_of",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "any_of": [
+        {
+         "not": {
+          "field": "action.params.a",
+          "op": "eq",
+          "value": 3
+         }
+        },
+        {
+         "field": "action.params.b",
+         "op": "eq",
+         "value": 1
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3,
+    "b": 2
+   },
+   "reason": "any of (not (a == 3); b == 1) not satisfied for pay on r/1"
+  },
+  {
+   "name": "group-over-8",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "any_of": [
+        {
+         "field": "a",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "b",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "c",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "d",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "e",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "f",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "g",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "h",
+         "op": "eq",
+         "value": 1
+        },
+        {
+         "field": "i",
+         "op": "eq",
+         "value": 1
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "any of (a == 1; b == 1; c == 1; d == 1; e == 1; f == 1; g == 1; h == 1) not satisfied for pay on r/1"
+  },
+  {
+   "name": "empty-all_of",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "all_of": []
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "all of () not satisfied for pay on r/1"
+  },
+  {
+   "name": "second-condition",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.a",
+       "op": "eq",
+       "value": 3
+      },
+      {
+       "field": "action.params.b",
+       "op": "eq",
+       "value": 4
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3,
+    "b": 5
+   },
+   "reason": "b == 4 not satisfied for pay on r/1"
+  },
+  {
+   "name": "second-predicate",
+   "predicates": [
+    {
+     "verb": "other",
+     "where": [
+      {
+       "field": "action.params.a",
+       "op": "eq",
+       "value": 9
+      }
+     ]
+    },
+    {
+     "verb": [
+      "x",
+      "pay"
+     ],
+     "resource": "*",
+     "where": [
+      {
+       "field": "action.params.a",
+       "op": "eq",
+       "value": 7
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "a == 7 not satisfied for pay on r/1"
+  },
+  {
+   "name": "unknown-where-missing-field",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": [
+      {
+       "field": "action.params.zz",
+       "op": "eq",
+       "value": 7
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "zz == 7 not satisfied for pay on r/1"
+  },
+  {
+   "name": "scope-verb-mismatch",
+   "predicates": [
+    {
+     "verb": "other",
+     "where": [
+      {
+       "field": "action.params.a",
+       "op": "eq",
+       "value": 9
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "no predicate permits pay on r/1"
+  },
+  {
+   "name": "scope-resource-mismatch",
+   "predicates": [
+    {
+     "verb": "pay",
+     "resource": "other/*",
+     "where": [
+      {
+       "field": "action.params.a",
+       "op": "eq",
+       "value": 9
+      }
+     ]
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "no predicate permits pay on r/1"
+  },
+  {
+   "name": "no-where",
+   "predicates": [
+    {
+     "verb": "other"
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "no predicate permits pay on r/1"
+  },
+  {
+   "name": "where-not-array",
+   "predicates": [
+    {
+     "verb": "pay",
+     "where": {
+      "a": 1
+     }
+    }
+   ],
+   "params": {
+    "a": 3
+   },
+   "reason": "no predicate permits pay on r/1"
+  },
+  {
+   "name": "empty-list",
+   "predicates": [],
+   "params": {
+    "a": 3
+   },
+   "reason": "envelope grants no predicates"
+  }
+ ]
+}
