@@ -52,8 +52,8 @@ object ReasonSnapshot {
         val ip = if (ctx["intent_policy_json"] is String) Pca.IntentPolicy.fromJsonText(ctx["intent_policy_json"] as String)
             else Pca.IntentPolicy.fromJson(ctx["intent_policy"])
         val v2 = if (ctx.containsKey("intent_v2")) IntentV2.Context.fromJson(ctx["intent_v2"]) else null
-        return if (v.containsKey("pcactn_json")) Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2)
-        else Pca.verifyPcactn(v["pcactn"], grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2)
+        return if (v.containsKey("pcactn_json")) Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2, insecureSkipPlanRootCheck = true)
+        else Pca.verifyPcactn(v["pcactn"], grant, Json.asLong(ctx["now"]), audience, allowed, ip, v2, insecureSkipPlanRootCheck = true)
     }
 
     /** The pinned verdict text of one Intent Layer v2 primitive (reasons included). */
@@ -169,7 +169,7 @@ object ReasonSnapshot {
                     fmt(Pca.verifyPcactnJson(raw, grant, Json.asLong(c["now"]), Pca.Audience.Of(c["aud"] as String), allowed,
                         if (c["intent_policy_json"] is String) Pca.IntentPolicy.fromJsonText(c["intent_policy_json"] as String)
                         else Pca.IntentPolicy.fromJson(c["intent_policy"]),
-                        if (c.containsKey("intent_v2")) IntentV2.Context.fromJson(c["intent_v2"]) else null))
+                        if (c.containsKey("intent_v2")) IntentV2.Context.fromJson(c["intent_v2"]) else null, insecureSkipPlanRootCheck = true))
                 }
             } else {
                 v = parseOutcome(raw, false) + "|len=" + parseOutcome(raw, true)

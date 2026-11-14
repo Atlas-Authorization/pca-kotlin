@@ -105,9 +105,9 @@ class DepthTotalityTest {
     @Test fun pcactnIsTotalOnHostileGrant() = small {
         val p = KUtil.valid()
         val g = LinkedHashMap(KUtil.validGrant()); g["zz"] = nested(100000)
-        assertFalse(Pca.verifyPcactn(p, g, 0L, KUtil.Of).allow)
+        assertFalse(Pca.verifyPcactn(p, g, 0L, KUtil.Of, insecureSkipPlanRootCheck = true).allow)
         val deep = LinkedHashMap(p); deep["risk_claim"] = m("r" to 0, "inputs" to m("x" to nested(100000)))
-        val w = Pca.verifyPcactn(deep, KUtil.validGrant(), 0L, KUtil.Of)
+        val w = Pca.verifyPcactn(deep, KUtil.validGrant(), 0L, KUtil.Of, insecureSkipPlanRootCheck = true)
         assertFalse(w.allow)
         assertEquals(false, w.checks["wire"])
     }

@@ -68,12 +68,12 @@ class StepUpTest {
             val items = c.pending()
             assertEquals(listOf("su_1"), items.map { it.id })
             assertEquals("pay", items[0].actionVerb)
-            val listReq = dash.takeRequest()
+            val listReq = dash.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)!!
             assertEquals("Bearer dsk_x", listReq.getHeader("Authorization"))
             assertTrue(listReq.path!!.contains("status=pending"))
 
             assertTrue(c.approve(items[0]).anchored)
-            val cos = inst.takeRequest()
+            val cos = inst.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)!!
             assertEquals("/v1/pca/stepups/su_1/cosign", cos.path)
             val body = Json.parseToJsonElement(cos.body.readUtf8()).jsonObject
             assertEquals("principal", body["role"]!!.jsonPrimitive.content)
@@ -81,7 +81,7 @@ class StepUpTest {
             assertTrue(verify(pub, msg, body["sig"]!!.jsonPrimitive.content))
 
             c.deny(items[0], "no")
-            assertTrue(dash.takeRequest().path!!.endsWith("/su_1/deny"))
+            assertTrue(dash.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)!!.path!!.endsWith("/su_1/deny"))
         } }
     }
 
