@@ -50,6 +50,17 @@ object IntentJs {
     }
 
     internal fun isNumber(o: Any?): Boolean = num(o) != null
+
+    private val ARRAY_INDEX = Regex("0|[1-9][0-9]{0,9}")
+
+    /** `Object.keys` order of a parsed object: canonical array-index keys first (ascending), then the rest in text order. */
+    internal fun jsKeys(m: Map<*, *>): List<String> {
+        val idx = ArrayList<String>()
+        val rest = ArrayList<String>()
+        for (o in m.keys) { val k = o as String; if (ARRAY_INDEX.matches(k) && k.toLong() < 4294967295L) idx.add(k) else rest.add(k) }
+        idx.sortBy { it.toLong() }
+        return idx + rest
+    }
     internal fun isNegZero(d: Double): Boolean = d == 0.0 && java.lang.Double.doubleToRawLongBits(d) != 0L
 
     /** `Number.isSafeInteger` (accepts -0). */

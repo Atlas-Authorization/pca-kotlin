@@ -61,8 +61,8 @@ class JsonPqThresholdUnitTest {
         assertEquals("{\"B\":1,\"a\":2,\"\u00e9\":3,\"\uff5e\":4,\"\ud83d\ude00\":5}", Json.canonicalize(m("\ud83d\ude00" to 5, "\uff5e" to 4, "\u00e9" to 3, "a" to 2, "B" to 1)))
         assertEquals("\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f \u007f\"", Json.canonicalize("\"\\\b\u000c\n\r\t\u0001\u001f \u007f"))
         assertEquals("\"\u00e9\ud83d\ude00\"", Json.canonicalize("\u00e9\ud83d\ude00"))
-        assertEquals("\"\ufffd\"", Json.canonicalize("\ud83d")); assertEquals("\"\ufffdx\"", Json.canonicalize("\ud83dx")); assertEquals("\"\ufffd\"", Json.canonicalize("\ude00"))
-        assertEquals("\"a\ufffd\"", Json.canonicalize("a\ud83d")); assertEquals("\"\ufffd\ud83d\ude00\"", Json.canonicalize("\ud83d\ud83d\ude00"))
+        assertEquals("\"\\ud83d\"", Json.canonicalize("\ud83d")); assertEquals("\"\\ud83dx\"", Json.canonicalize("\ud83dx")); assertEquals("\"\\ude00\"", Json.canonicalize("\ude00")) // JSON.stringify: a lone surrogate is escaped
+        assertEquals("\"a\\ud83d\"", Json.canonicalize("a\ud83d")); assertEquals("\"\\ud83d\ud83d\ude00\"", Json.canonicalize("\ud83d\ud83d\ude00"))
         assertEquals("canonicalize: lone surrogate in string", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict("\ud83d") }.message)
         assertEquals("canonicalize: lone surrogate in string", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(m("\ude00" to 1)) }.message)
         assertEquals("100000", Json.canonicalize(n("1e5"))); assertEquals("1.5", Json.canonicalize(n("1.50"))); assertEquals("0", Json.canonicalize(n("-0"))); assertEquals("0", Json.canonicalize(n("0.0")))

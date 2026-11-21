@@ -545,6 +545,9 @@ object SafeRegex {
         }
     }
 
+    /** Regex evaluations refused so far by the open document budget (0 when none is open): the reference's `regexRefusals`. */
+    internal fun refusals(): Int = CURRENT.get()?.refusals ?: 0
+
     /** Charge one evaluation of `src` against a subject of `subjectLen` code units (chargeRegex). */
     internal fun charge(src: String, subjectLen: Int): Boolean = (CURRENT.get() ?: Budget()).charge(src, subjectLen)
 }

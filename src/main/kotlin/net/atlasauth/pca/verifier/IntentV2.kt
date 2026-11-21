@@ -23,6 +23,20 @@ object IntentV2 {
         /** False for a PRESENT context that is not a JSON object (null included): every reportable v2 check fails. */
         internal val wellFormed: Boolean,
     ) {
+        /** A copy with `env` (the host's tighten-rule context members) replaced. */
+        fun withEnv(env: Any?): Context {
+            val m = LinkedHashMap(raw)
+            m["env"] = IntentJs.normalize(env)
+            return Context(m, wellFormed)
+        }
+
+        /** A copy without `env` (TypeScript `undefined`: an explicit null env with no host env is absent, not malformed). */
+        fun withoutEnv(): Context {
+            val m = LinkedHashMap(raw)
+            m.remove("env")
+            return Context(m, wellFormed)
+        }
+
         /** A copy with `params` replaced (a host supplying the plaintext params it parsed from the request). */
         fun withParams(params: Any?): Context {
             val m = LinkedHashMap(raw)
@@ -65,6 +79,12 @@ object IntentV2 {
     class Decision {
         val checks: MutableList<Check> = ArrayList()
         val env: MutableMap<String, Any?> = LinkedHashMap()
+
+        /** Worlds decided by a single oracle (their `env.world.<name>` is model-derived, rule 21). */
+        var singleSource: List<String> = emptyList()
+
+        /** Rule 21 compatibility mode in effect (a grant reads model-derived paths under `legacy`): report the verdict degraded. */
+        var legacyModelPolarity: Boolean = false
     }
 
     /** True iff any v2 check would be reported (a malformed present context fails closed, so it counts). */
@@ -93,7 +113,8 @@ object IntentV2 {
         if (!optMap(c, "policy")) return "policy must be an object"
         if (c.containsKey("policy")) {
             val pr = IntentJs.obj(c["policy"])
-            for (k in pr.keys) if (k != "session" && k != "schema" && k != "acc" && k != "map") return "policy: unknown member '$k'"
+            for (k in pr.keys) if (k != "session" && k != "schema" && k != "acc" && k != "map" && k != "model_polarity") return "policy: unknown member '$k'"
+            if (pr.containsKey("model_polarity") && pr["model_polarity"] != "strict" && pr["model_polarity"] != "legacy") return "policy.model_polarity must be 'strict' or 'legacy'"
             if (!optMap(pr, "session")) return "policy.session must be an object"
             if (pr.containsKey("session")) {
                 val o = IntentJs.obj(pr["session"])
@@ -122,7 +143,15 @@ object IntentV2 {
                 if (o.containsKey("max_residual_risk_ppm") && !IntentJs.isNonNeg(o["max_residual_risk_ppm"])) return "policy.map.max_residual_risk_ppm must be a non-negative safe integer"
             }
         }
+        if (!optMap(c, "reviewers") || (c.containsKey("reviewers") && IntentJs.get(c["reviewers"], "keys") !is List<*>)) return "reviewers must be {keys: [...]}"
+        if (c.containsKey("call_context")) {
+            val cc = c["call_context"]
+            if (cc !is List<*> || cc.any { it !is String }) return "call_context must be an array of strings"
+        }
+        if (!optMap(c, "actions")) return "actions must be an object"
+        for (k in listOf("records", "keys", "reapprovals")) if (!optList(c["actions"], k)) return "actions.$k must be an array"
         if (!optMap(c, "params")) return "params must be an object"
+        if (!optMap(c, "env")) return "env must be an object"
         for (k in listOf("schema", "session", "acc")) if (!optMap(c, k)) return "$k must be an object"
         if (!optMap(c, "map")) return "map must be an object"
         if (c.containsKey("map")) for (k in IntentJs.obj(c["map"]).keys) if (k != "disclosure") return "map: unknown member '$k'"
@@ -204,6 +233,8 @@ object IntentV2 {
         val v = ActionSchema.verify(doc, ctx!!.get("schema", "keys"))
         if (v != null) return "schema does not verify: $v"
         if (IntentJs.get(doc, "aud") != p["aud"]) return "schema aud does not match the PCActn aud"
+        // rule 22, integrity half: the document's materialized floors and traits are recomputed, never trusted
+        if (isV2(doc)) Actions.schemaFloorError(IntentJs.obj(doc), cget(ctx, "reviewers"))?.let { return "schema_floor_forged: $it" }
         val params = cget(ctx, "params")
         if (params !is Map<*, *>) return "no plaintext params to check against the schema (closed world needs them)"
         if (Pca.paramsDigest(params) != IntentJs.get(p["action"], "params_digest")) return "params do not hash to action.params_digest"
@@ -217,9 +248,8 @@ object IntentV2 {
     private fun resourceOf(p: Map<String, Any?>): String = IntentRevocation.jsText(IntentJs.get(p["action"], "resource"), IntentJs.own(p["action"], "resource"))
 
     // ---- the bound root (rules 13 and 15) ----
-    private class Bound { var root: Map<String, Any?> = emptyMap() }
-
-    private fun boundRoot(isn: Map<String, Any?>, ctx: Context?, now: Double, out: Bound): String? {
+    /** The verified session root, or the refusal reason (a String). */
+    private fun boundRoot(isn: Map<String, Any?>, ctx: Context?, now: Double): Any {
         if (ctx == null || !ctx.has("session", "root")) return "no session root for this session"
         val s = ctx.get("session", "root")
         // a PQ / hybrid root verifies only under the VERIFIER's pin for its signer (session.pq_pins), never its own principals
@@ -228,8 +258,7 @@ object IntentV2 {
         if (IntentSession.rootDigest(s) != isn["root"]) return "intent_session.root is not the digest of the session root"
         if (IntentJs.get(s, "session") != isn["session"]) return "the session root names another session"
         if (!(now < IntentJs.num(IntentJs.get(s, "expires_at"))!!)) return "the session root has expired"
-        out.root = IntentJs.obj(s)
-        return null
+        return IntentJs.obj(s)
     }
 
     // ---- rule 13 ----
@@ -243,10 +272,7 @@ object IntentV2 {
         val isn = IntentJs.obj(p["intent_session"])
         if (!p.containsKey("intent")) return "an intent_session needs the envelope.intent binding"
         val intent = IntentJs.obj(p["intent"])
-        val b = Bound()
-        val e = boundRoot(isn, ctx, now, b)
-        if (e != null) return e
-        val s = b.root
+        val s = when (val r = boundRoot(isn, ctx, now)) { is String -> return r; else -> IntentJs.obj(r) }
         if (s["intent_ref"] != intent["ref"]) return "intent.ref is not the session statement"
         if (IntentJs.get(s["schema"], "digest") != isn["schema"]) return "intent_session.schema is not the session schema"
         if (IntentJs.get(s["schema"], "aud") != p["aud"]) return "the session schema is for another audience"
@@ -307,11 +333,8 @@ object IntentV2 {
     // ---- rule 15 ----
     private fun accStep(p: Map<String, Any?>, ctx: Context?, now: Double, accEnv: MutableMap<String, Any?>, monEnv: MutableMap<String, Any?>): String? {
         val isn = IntentJs.obj(p["intent_session"])
-        val b = Bound()
-        val e = boundRoot(isn, ctx, now, b)
-        if (e != null) return e
+        val s = when (val r = boundRoot(isn, ctx, now)) { is String -> return r; else -> IntentJs.obj(r) }
         ctx!!
-        val s = b.root
         val ce = accCtxError(ctx) ?: schemaCtxError(ctx)
         if (ce != null) return ce
         val verb = verbOf(p)
@@ -462,11 +485,15 @@ object IntentV2 {
             if (present && mapCommitted(p)) out.checks.add(Check("map", false, "malformed v2 context: $ctxErr"))
             return out
         }
+        var matchedDoc: Any? = null
         if (present || closedWorld(ctx)) {
             run(out, "schema", clockOk) {
                 val matched = Matched()
                 val why = schemaStep(p, ctx, matched)
-                if (why == null) out.env["canon"] = ActionSchema.canonProjection(matched.doc, verbOf(p), IntentJs.obj(ctx!!.get("params")))
+                if (why == null) {
+                    matchedDoc = matched.doc
+                    out.env["canon"] = ActionSchema.canonProjection(matched.doc, verbOf(p), IntentJs.obj(ctx!!.get("params")))
+                }
                 why
             }
         }
@@ -524,11 +551,82 @@ object IntentV2 {
                     wb.prov?.let { out.env["prov"] = it }
                     wb.cls?.let { out.env["class"] = it }
                 }
+                wb.singleSource?.let { out.singleSource = ArrayList(it) } // IntentWB leaves it null unless non-empty
             }
         } else if (mapActive) {
             run(out, "map", clockOk) { mapStep(p, ctx) }
         }
+        modelRules(p, grant, ctx, out, clockOk, action, matchedDoc)
         return out
+    }
+
+    /** The predicate lists a model-derived path could widen: the grant's allow-list and the ceilings (V5 layers). */
+    private fun allowSidePredicates(env: Map<String, Any?>?, ctx: Context?): List<Any?> {
+        val lists = ArrayList<Any?>()
+        lists.add(env?.get("predicates"))
+        val layers = ctx?.get("layers")
+        if (layers is Map<*, *>) for (k in listOf("org", "site", "std")) lists.add(IntentJs.get(layers[k], "predicates"))
+        return lists
+    }
+
+    /**
+     * Rules 20 and 21, evaluated last (after `classes`, so the verifier-computed `env` is complete). Both read the signed
+     * ENVELOPE of the stored grant. `units` (20): reported iff `envelope.units` is present. `tighten` (21): reported iff
+     * `envelope.tighten` or a `model_polarity` (envelope or policy) is present, or a grant-side `where` reads a model-derived
+     * env path (refused, never silently skipped). A PCActn with none of these verifies as before.
+     */
+    private fun modelRules(
+        p: Map<String, Any?>, grant: Map<String, Any?>?, ctx: Context?, out: Decision, clockOk: Boolean,
+        action: Map<String, Any?>, schemaDoc: Any?,
+    ) {
+        val env = Authorize.readEnvelope(grant)
+        val preds = allowSidePredicates(env, ctx)
+        val verb = verbOf(p)
+        val memo = SchemaMemo(p, ctx, schemaDoc)
+        pinAndTraits(grant, ctx, out, clockOk, env, verb, schemaDoc, memo)
+        if (env != null && env.containsKey("units")) {
+            run(out, "units", clockOk) {
+                val why = memo.step()
+                if (why != null) why
+                else {
+                    val doc = memo.doc
+                    val v = ActionSchema.schemaVerb(doc, verb)
+                    val inp = LinkedHashMap<String, Any?>()
+                    inp["units"] = env["units"]
+                    if (IntentJs.own(doc, "units")) inp["schema_units"] = IntentJs.get(doc, "units")
+                    if (v != null && v.containsKey("params")) inp["verb_params"] = v["params"]
+                    inp["verb"] = verb
+                    inp["predicates"] = preds
+                    val d = PcaDecision.decideUnits(inp)
+                    if (d.ok) null else d.reason
+                }
+            }
+        }
+        val polIn = ctx != null && ctx.has("policy", "model_polarity")
+        var hasPol = false
+        var pol: Any? = null
+        if (polIn) {
+            val pv = ctx!!.get("policy", "model_polarity")
+            if (pv != "strict") { hasPol = true; pol = pv }
+        } else if (env != null && env.containsKey("model_polarity")) { hasPol = true; pol = env["model_polarity"] }
+        val single = out.singleSource
+        if ((env != null && env.containsKey("tighten")) || hasPol || polIn || PcaDecision.modelPathsRead(preds, single).isNotEmpty()) {
+            run(out, "tighten", clockOk) {
+                val inp = LinkedHashMap<String, Any?>()
+                inp["predicates"] = preds
+                if (env != null && env.containsKey("tighten")) inp["tighten"] = env["tighten"]
+                if (hasPol) inp["polarity"] = pol
+                inp["single_source"] = single
+                val merged = LinkedHashMap<String, Any?>()
+                val hostEnv = ctx?.get("env")
+                if (hostEnv is Map<*, *>) for ((k, v) in hostEnv) merged[k as String] = v
+                merged.putAll(out.env)
+                inp["context"] = linkedMapOf("action" to action, "env" to merged)
+                val r = PcaDecision.decideTighten(inp)
+                if (r.legacy) out.legacyModelPolarity = true
+                if (r.outcome == "ok") null else (r.reason ?: "refused")
+            }
+        }
     }
 
     /**
@@ -545,5 +643,80 @@ object IntentV2 {
             ctx.has("params"), ctx.get("params"), ctx.get("map", "disclosure"), eps,
         )
         return if (d.ok) null else d.reason
+    }
+
+    private fun isV2(doc: Any?): Boolean = IntentJs.num(IntentJs.get(doc, "v")) == 2.0
+
+    /** The rule 14 schema: the matched one, else one schema step shared by the checks below it; a step that threw is run again (TS `??=`). */
+    private class SchemaMemo(private val p: Map<String, Any?>, private val ctx: Context?, doc: Any?) {
+        var doc: Any? = doc
+            private set
+        private var done = doc != null
+        private var why: String? = null
+        fun step(): String? {
+            if (!done) {
+                val m = Matched()
+                why = schemaStep(p, ctx, m)
+                doc = m.doc
+                done = true
+            }
+            return why
+        }
+    }
+
+    /** A schema step that throws has already failed the pin check (same step), so it never reaches `traits`; the reference lets it propagate, this verifier never throws. */
+    internal fun orFalse(f: () -> Boolean): Boolean = try {
+        f()
+    } catch (e: RuntimeException) {
+        false
+    } catch (e: StackOverflowError) {
+        false
+    }
+
+    /** The `pin` and `traits` checks (intent-v2.ts:614-634). The rule 22 engine is built in, so there is no `schema_floor_unchecked` path. */
+    private fun pinAndTraits(
+        grant: Map<String, Any?>?, ctx: Context?, out: Decision, clockOk: Boolean, env: Map<String, Any?>?, verb: String, schemaDoc: Any?, memo: SchemaMemo,
+    ) {
+        val pinWire = env?.get("actions")
+        val hasPin = env != null && env.containsKey("actions")
+        if (hasPin) {
+            run(out, "pin", clockOk) {
+                val why = memo.step()
+                if (why != null) why
+                else {
+                    val d = ActionsRegistry.decidePin(
+                        linkedMapOf(
+                            "pin" to pinWire, "doc" to memo.doc, "verb" to verb,
+                            "records" to cget(ctx, "actions", "records"), "keys" to cget(ctx, "actions", "keys"), "reapprovals" to cget(ctx, "actions", "reapprovals"),
+                            "grant" to linkedMapOf("id" to IntentJs.get(grant, "id"), "issuer" to IntentJs.get(grant, "issuer")),
+                        ),
+                    )
+                    if (d["ok"] == true) null
+                    else (if (d["escalate"] == true) "escalate: " else "") + "${d["code"]}: ${d["reason"]}" + (if (d.containsKey("needs_reapproval")) " (re-approve diff ${d["needs_reapproval"]})" else "")
+                }
+            }
+        }
+        if (isV2(schemaDoc) || (hasPin && orFalse { memo.step(); isV2(memo.doc) })) {
+            run(out, "traits", clockOk) {
+                val why = memo.step()
+                if (why != null) why
+                else {
+                    val pin = if (hasPin && ActionsRegistry.actionPinError(pinWire) == null) IntentJs.obj(pinWire) else null
+                    val caveats = ArrayList<Any?>() // rule22Decide keeps only the known caveat kinds
+                    for (c in (env?.get("caveats") as List<*>?) ?: emptyList<Any?>()) caveats.add(IntentJs.get(c, "type"))
+                    for (c in (pin?.get("caveats") as List<*>?) ?: emptyList<Any?>()) caveats.add(c)
+                    val g = linkedMapOf<String, Any?>(
+                        "caveats" to caveats,
+                        "max_esc" to (pin?.get("max_esc") ?: IntentJs.ofLong(ActionsRegistry.MAX_ESC_TIER.toLong())),
+                        "preauth_esc" to (pin?.get("preauth_esc") ?: IntentJs.ofLong(0)),
+                    )
+                    when (ActionsRegistry.rule22Decide(memo.doc, verb, g, (cget(ctx, "call_context") as List<*>?) ?: emptyList<Any?>())) {
+                        "allow" -> null
+                        "escalate" -> "escalate: the action floors need a caveat, context or confirmation the grant does not provide (rule 22)"
+                        else -> "the action floors exceed what the grant authorizes (rule 22)"
+                    }
+                }
+            }
+        }
     }
 }

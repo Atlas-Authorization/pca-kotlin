@@ -1303,7 +1303,7 @@
   {
    "name": "shape/doc/v 2",
    "doc": "{\"v\":2,\"kind\":\"pca-action-schema\",\"site\":\"https://site.example\",\"aud\":\"aud.example\",\"version\":\"1\",\"units\":{\"usd_cents\":{\"kind\":\"money\",\"currency\":\"USD\",\"exponent\":2},\"trip.nights\":{\"kind\":\"count\"}},\"verbs\":[{\"verb\":\"v.do\",\"kind\":\"write\",\"params\":{\"action.params.x\":{\"type\":\"string\",\"semantic\":\"s\",\"sensitivity\":\"free\"}}}],\"sig\":{\"alg\":\"ed25519\",\"kid\":\"k1\",\"value\":\"AAAA\"}}",
-   "want": "unsupported schema version"
+   "want": "verb 'v.do': effects must be 1..12 known effects"
   },
   {
    "name": "shape/doc/v str",
@@ -1819,7 +1819,7 @@
    "name": "verify/shape bad",
    "doc": "{\"v\":2,\"kind\":\"pca-action-schema\",\"site\":\"https://site.example\",\"aud\":\"aud.example\",\"version\":\"1\",\"units\":{\"usd_cents\":{\"kind\":\"money\",\"currency\":\"USD\",\"exponent\":2},\"trip.nights\":{\"kind\":\"count\"}},\"verbs\":[{\"verb\":\"v.do\",\"kind\":\"write\",\"params\":{\"action.params.x\":{\"type\":\"string\",\"semantic\":\"s\",\"sensitivity\":\"free\"}}}],\"sig\":{\"alg\":\"ed25519\",\"kid\":\"k1\",\"value\":\"BqvcoB9MRzgKHEwuufK_jIzAxkn3c1q9pMgdFOx_XD4_CBkX-uN1TOVGPeJqQR1CCdcBAVatdexXvs4-eNj9DQ\"}}",
    "keys": "[{\"kid\":\"k1\",\"alg\":\"ed25519\",\"pk\":\"RdWmii7FTXS7PQ7N1LgUAurldwsK0ayS-oyvZ5wL4Yc\"}]",
-   "want": "unsupported schema version"
+   "want": "verb 'v.do': effects must be 1..12 known effects"
   },
   {
    "name": "verify/keys obj",

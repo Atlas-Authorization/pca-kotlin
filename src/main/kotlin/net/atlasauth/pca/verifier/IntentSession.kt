@@ -132,21 +132,21 @@ object IntentSession {
             }
             val sc = s["schema"]
             val scAud = IntentJs.get(sc, "aud")
-            if (!sortedKeysAre(sc, "aud", "digest") || scAud !is String || scAud.isEmpty() || !b32(IntentJs.get(sc, "digest")))
+            if (scAud !is String || scAud.isEmpty() || !b32(IntentJs.get(sc, "digest")) || !sortedKeysAre(sc, "aud", "digest"))
                 return "schema must be {aud, digest}"
             val layers = s["layers"]
             if (layers !is Map<*, *>) return "layers must be an object"
             for (k in layers.keys) if (k !in listOf("org", "std", "task")) return "layers: unknown member '$k'"
             val task = IntentJs.get(layers, "task")
-            if (!sortedKeysAre(task, "map_digest") || !b32(IntentJs.get(task, "map_digest"))) return "layers.task must be {map_digest}"
+            if (!b32(IntentJs.get(task, "map_digest")) || !sortedKeysAre(task, "map_digest")) return "layers.task must be {map_digest}"
             val org = IntentJs.get(layers, "org")
             if (IntentJs.own(layers, "org") && (org !is Map<*, *> || !b32(IntentJs.get(org, "digest")))) return "layers.org must be an object with a 32-byte digest (absent = no org layer; null is malformed)"
             val std = IntentJs.get(layers, "std")
             if (IntentJs.own(layers, "std")) {
                 val prof = IntentJs.get(std, "profile")
                 val ver = IntentJs.get(std, "version")
-                if (!sortedKeysAre(std, "digest", "profile", "version") || prof !is String || prof.isEmpty() || IntentJs.u8len(prof) > 128 ||
-                    !(IntentJs.isInt(ver) && IntentJs.num(ver)!! >= 1) || !b32(IntentJs.get(std, "digest"))
+                if (prof !is String || prof.isEmpty() || IntentJs.u8len(prof) > 128 ||
+                    !(IntentJs.isInt(ver) && IntentJs.num(ver)!! >= 1) || !b32(IntentJs.get(std, "digest")) || !sortedKeysAre(std, "digest", "profile", "version")
                 ) return "layers.std must be {profile, version >= 1, digest} (absent = no standing profile; null is malformed)"
             }
             val accs = s["accumulators"]
@@ -219,7 +219,7 @@ object IntentSession {
             var pin: Map<String, Any?>? = null
             val suite = Pq.resolveSigAlg(s["alg"], s.containsKey("alg"))
             if (suite != null && suite.needsPqPk) {
-                val pv = if (pqPins is Map<*, *> && pqPins.containsKey(signer)) pqPins[signer] else null
+                val pv = if (pqPins is Map<*, *>) pqPins[signer] else null
                 if (pv !is String) return "session root suite '${suite.alg}' needs the signer's PQ key pinned by the verifier (pq_pins); the root's own principals entry proves nothing about who signed it"
                 if (!s.containsKey("pq_pk") || s["pq_pk"] != pv) return "session root pq_pk does not match the verifier's pin for the signer"
                 if (p.containsKey("pq_pk") && p["pq_pk"] != pv) return "session root pq_pk does not match the signer's principals entry"

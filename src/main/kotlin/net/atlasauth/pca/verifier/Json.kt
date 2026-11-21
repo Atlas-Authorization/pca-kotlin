@@ -1,7 +1,6 @@
 package net.atlasauth.pca.verifier
 
 import java.math.BigDecimal
-import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 
 /**
@@ -29,7 +28,7 @@ object Json {
     const val MAX_LENIENT_DEPTH = 512
     const val MAX_CHARS = 1 shl 20
     const val MAX_DECIMAL_DIGITS = 15
-    private val MAX_SAFE: BigInteger = BigInteger.valueOf(9007199254740991L)
+    private const val MAX_SAFE_TEXT = "9007199254740991" // 2^53 - 1
     private val MIN_DECIMAL = BigDecimal("0.000001")
     private val LEXEME = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
 
@@ -62,7 +61,8 @@ object Json {
             return null
         }
         val abs = if (raw.startsWith("-")) raw.substring(1) else raw
-        if (abs.length > 16 || BigInteger(abs).compareTo(MAX_SAFE) > 0) return "integer outside the safe range"
+        // LEXEME has no leading zero, so 17+ digits always exceed 2^53-1 and 16 digits compare as text; no BigInteger parse of a long lexeme
+        if (abs.length > 16 || (abs.length == 16 && abs > MAX_SAFE_TEXT)) return "integer outside the safe range"
         return null
     }
 
@@ -113,7 +113,11 @@ object Json {
     fun parse(s: String?): Any? = Parser(s, true).top()
 
     /** Lenient RFC 8259 (fixtures only): duplicate keys / lone surrogates / any number allowed. */
-    fun parseLenient(s: String?): Any? = Parser(s, false).top()
+    fun parseLenient(s: String?): Any? = try {
+        Parser(s, false).top()
+    } catch (e: StackOverflowError) { // no fixed cap (JSON.parse has none), but a deep document is an ordinary refusal for every caller
+        throw IllegalArgumentException("nesting too deep")
+    }
 
     private fun dig(c: Char): Boolean = c in '0'..'9'
 
@@ -288,14 +292,30 @@ object Json {
 
     /** Bytewise UTF-8 comparison of two strings (== Unicode code point order). */
     fun compareUtf8(a: String, b: String): Int {
-        val ba = a.toByteArray(StandardCharsets.UTF_8)
-        val bb = b.toByteArray(StandardCharsets.UTF_8)
+        if (a == b) return 0
+        // TS encodes each lone surrogate as U+FFFD (Java's encoder writes '?')
+        val ba = loneToFffd(a).toByteArray(StandardCharsets.UTF_8)
+        val bb = loneToFffd(b).toByteArray(StandardCharsets.UTF_8)
         val n = minOf(ba.size, bb.size)
         for (k in 0 until n) {
             val d = (ba[k].toInt() and 0xff) - (bb[k].toInt() and 0xff)
             if (d != 0) return d
         }
-        return ba.size - bb.size
+        if (ba.size != bb.size) return ba.size - bb.size
+        return a.compareTo(b) // equal bytes: only lone surrogates; UTF-16 code-unit order as TS `a < b`
+    }
+
+    private fun loneToFffd(s: String): String {
+        if (!hasLoneSurrogate(s)) return s
+        val sb = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (Character.isHighSurrogate(c) && i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) { sb.append(c).append(s[i + 1]); i += 2; continue }
+            sb.append(if (Character.isSurrogate(c)) '\uFFFD' else c)
+            i++
+        }
+        return sb.toString()
     }
 
     private fun jsString(sb: StringBuilder, s: String, strict: Boolean) {
@@ -318,9 +338,9 @@ object Json {
                     } else if (Character.isHighSurrogate(c)) {
                         if (i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) {
                             sb.append(c).append(s[++i])
-                        } else sb.append('�')
+                        } else sb.append("\\u").append(String.format("%04x", c.code)) // JSON.stringify: lone surrogate -> \udXXX
                     } else if (Character.isLowSurrogate(c)) {
-                        sb.append('�') // lenient only (strict rejected above)
+                        sb.append("\\u").append(String.format("%04x", c.code)) // lenient only (strict rejected above)
                     } else sb.append(c)
                 }
             }
@@ -339,7 +359,32 @@ object Json {
         }
         if (f.isInfinite() || f.isNaN()) throw IllegalArgumentException("canonicalize: non-finite number")
         if (f == 0.0) return "0"
-        return BigDecimal(f.toString()).stripTrailingZeros().toPlainString()
+        return esNumber(f)
+    }
+
+    /** ECMAScript `Number::toString` (shortest round-trip digits; exponent form for n > 21 or n <= -6) of a finite non-zero double. */
+    fun esNumber(f: Double): String {
+        val exact = BigDecimal(Math.abs(f))
+        var r = exact
+        for (p in 1..17) {
+            r = exact.round(java.math.MathContext(p, java.math.RoundingMode.HALF_EVEN))
+            if (r.toDouble() == Math.abs(f)) break
+        }
+        val all = r.unscaledValue().toString()
+        val n = all.length - r.scale()
+        // the first p that round-trips never ends in 0 (a trailing 0 at p means p-1 digits already round-trip); 0 is "0"
+        val d = all
+        val k = d.length
+        val body = when {
+            n in k..21 -> d + "0".repeat(n - k)
+            n in 1..21 -> d.substring(0, n) + "." + d.substring(n)
+            n > -6 && n <= 0 -> "0." + "0".repeat(-n) + d
+            else -> {
+                val e = n - 1
+                (if (k == 1) d else d.substring(0, 1) + "." + d.substring(1)) + "e" + (if (e < 0) "-" else "+") + Math.abs(e)
+            }
+        }
+        return if (f < 0) "-$body" else body
     }
 
     @Suppress("UNCHECKED_CAST")

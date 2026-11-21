@@ -49,32 +49,32 @@ class PcaUnitTest {
         assertEquals(mm, Pca.asMap(mm))
     }
 
-    private fun bad(b: ByteArray, off: Int): Boolean = priv(Pca, "badPointEncoding", b, off)
+    private fun bad(b: ByteArray): Boolean = priv(Pca, "badPointEncoding", b)
 
     @Test fun badPoint() {
         val P = KUtil.P
-        assertTrue(bad(KUtil.le(P), 0))
-        assertTrue(bad(KUtil.le(P.add(BigInteger.ONE)), 0))
-        assertTrue(bad(KUtil.le(BigInteger.ONE.shiftLeft(255).subtract(BigInteger.ONE)), 0))
-        assertFalse(bad(KUtil.le(P.subtract(BigInteger.TWO)), 0))
+        assertTrue(bad(KUtil.le(P)))
+        assertTrue(bad(KUtil.le(P.add(BigInteger.ONE))))
+        assertTrue(bad(KUtil.le(BigInteger.ONE.shiftLeft(255).subtract(BigInteger.ONE))))
+        assertFalse(bad(KUtil.le(P.subtract(BigInteger.TWO))))
         val hi = KUtil.le(P.subtract(BigInteger.TWO)); hi[31] = (hi[31].toInt() or 0x80).toByte()
-        assertFalse(bad(hi, 0))
+        assertFalse(bad(hi))
         val hiP = KUtil.le(P); hiP[31] = (hiP[31].toInt() or 0x80).toByte()
-        assertTrue(bad(hiP, 0))
+        assertTrue(bad(hiP))
         for (y in listOf(BigInteger.ONE, P.subtract(BigInteger.ONE), BigInteger.ZERO,
             BigInteger("7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7", 16),
             BigInteger("05fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826", 16))) {
-            assertTrue(y.toString(16), bad(KUtil.le(y), 0))
+            assertTrue(y.toString(16), bad(KUtil.le(y)))
             val s = KUtil.le(y); s[31] = (s[31].toInt() or 0x80).toByte()
-            assertTrue("signbit " + y.toString(16), bad(s, 0))
+            assertTrue("signbit " + y.toString(16), bad(s))
         }
-        assertFalse(bad(KUtil.le(BigInteger.TWO), 0))
-        assertFalse(bad(KUtil.le(BigInteger.valueOf(3)), 0))
+        assertFalse(bad(KUtil.le(BigInteger.TWO)))
+        assertFalse(bad(KUtil.le(BigInteger.valueOf(3))))
         val big = ByteArray(70); System.arraycopy(KUtil.le(P), 0, big, 5, 32)
-        assertTrue(bad(big, 5)); assertFalse(bad(big, 6))
+        assertTrue(bad(big.copyOfRange(5, 37))); assertFalse(bad(big.copyOfRange(6, 38)))
         val big2 = ByteArray(70); System.arraycopy(KUtil.le(BigInteger.TWO), 0, big2, 33, 32)
-        assertFalse(bad(big2, 33))
-        assertThrows(RuntimeException::class.java) { bad(ByteArray(40), 10) }
+        assertFalse(bad(big2.copyOfRange(33, 65)))
+        assertThrows(RuntimeException::class.java) { bad(ByteArray(31)) }
     }
 
     @Test fun ed25519() {
@@ -113,6 +113,15 @@ class PcaUnitTest {
         for (y in 0..19) for (sign in 0..1) {
             val e = KUtil.le(KUtil.P.add(BigInteger.valueOf(y.toLong()))); if (sign == 1) e[31] = (e[31].toInt() or 0x80).toByte()
             assertFalse(org.bouncycastle.math.ec.rfc8032.Ed25519.validatePublicKeyFull(e, 0))
+        }
+        // the same holds for every small-order point of the table (both sign bits): the point-encoding gate is redundant with the library check
+        for (y in listOf(BigInteger.ZERO, BigInteger.ONE, KUtil.P.subtract(BigInteger.ONE),
+            BigInteger("7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7", 16),
+            BigInteger("05fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826", 16))) for (sign in 0..1) {
+            val e = KUtil.le(y); if (sign == 1) e[31] = (e[31].toInt() or 0x80).toByte()
+            assertFalse(org.bouncycastle.math.ec.rfc8032.Ed25519.validatePublicKeyFull(e, 0))
+            assertFalse(Pca.ed25519Strict(e, tm, sig))
+            assertFalse(Pca.ed25519Strict(pk, tm, e + sig.copyOfRange(32, 64)))
         }
     }
 
@@ -463,70 +472,70 @@ class PcaUnitTest {
 
     @Test fun verifyApi() {
         val raw = vec("valid-raw-json-format-insensitive")["pcactn_json"] as String
-        var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, KUtil.Of)
+        var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true)
         assertTrue(g.allow); assertEquals("", g.reason)
-        assertEquals(listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"), g.checks.keys.toList())
-        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of); assertTrue(g.allow)
+        assertEquals(listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"), g.checks.keys.toList())
+        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true); assertTrue(g.allow)
         // audience tri-state
-        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Any); assertTrue(g.allow)
-        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Unset)
+        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Any, insecureSkipPlanRootCheck = true); assertTrue(g.allow)
+        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Unset, insecureSkipPlanRootCheck = true)
         assertFalse(g.allow); assertEquals("audience: PCActn carries a signed aud but this verifier supplied no audience", g.reason)
-        assertEquals(false, g.checks["audience"]); assertEquals(true, g.checks["counter"]); assertEquals(true, g.checks["leaf_signature"])
-        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Of("other"))
+        assertEquals(false, g.checks["audience"]); assertEquals(true, g.checks["counter_format"]); assertEquals(true, g.checks["leaf_signature"])
+        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, Pca.Audience.Of("other"), insecureSkipPlanRootCheck = true)
         assertEquals("audience: aud does not match this resource server / instance", g.reason)
         // wire
-        g = Pca.verifyPcactn("x", validGrant(), NOW, KUtil.Of); assertEquals("wire: PCActn is not an object", g.reason)
+        g = Pca.verifyPcactn("x", validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true); assertEquals("wire: PCActn is not an object", g.reason)
         assertEquals(listOf("wire"), g.checks.keys.toList()); assertEquals(false, g.checks["wire"])
-        g = Pca.verifyPcactnJson(" ".repeat(524289), validGrant(), NOW, KUtil.Of); assertEquals("wire: artifact exceeds size limit (max 524288 bytes)", g.reason)
-        assertTrue(Pca.verifyPcactnJson(raw + " ".repeat(10), validGrant(), NOW, KUtil.Of).allow)
-        g = Pca.verifyPcactnJson("{", validGrant(), NOW, KUtil.Of); assertEquals("wire: strict JSON: expected key at 1", g.reason)
+        g = Pca.verifyPcactnJson(" ".repeat(524289), validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true); assertEquals("wire: artifact exceeds size limit (max 524288 bytes)", g.reason)
+        assertTrue(Pca.verifyPcactnJson(raw + " ".repeat(10), validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).allow)
+        g = Pca.verifyPcactnJson("{", validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true); assertEquals("wire: strict JSON: expected key at 1", g.reason)
         var p = mm(Json.parse(raw)); p["ver"] = n("3")
-        assertEquals("version: unsupported ver (this verifier requires 2)", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
+        assertEquals("version: unsupported ver (this verifier requires 2)", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         val iat = 1800000000000L
         p = mm(Json.parse(raw)); p["exp"] = n("$iat")
-        assertEquals("validity: exp must be greater than iat", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
-        p["exp"] = n("${iat + 3600001}"); assertEquals("validity: lifetime exceeds 3600000 ms", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
-        p["exp"] = n("${iat + 3600000}"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["validity"])
+        assertEquals("validity: exp must be greater than iat", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        p["exp"] = n("${iat + 3600001}"); assertEquals("validity: lifetime exceeds 3600000 ms", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        p["exp"] = n("${iat + 3600000}"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).checks["validity"])
         p["exp"] = n("${iat + 600000}")
-        assertEquals("validity: iat is in the future (clock skew)", Pca.verifyPcactn(p, validGrant(), NOW - 60001, KUtil.Of).reason)
-        assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW - 60000, KUtil.Of).checks["validity"])
-        assertEquals("validity: the PCActn has expired", Pca.verifyPcactn(p, validGrant(), iat + 600001, KUtil.Of).reason)
-        assertEquals(true, Pca.verifyPcactn(p, validGrant(), iat + 600000, KUtil.Of).checks["validity"])
+        assertEquals("validity: iat is in the future (clock skew)", Pca.verifyPcactn(p, validGrant(), NOW - 60001, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW - 60000, KUtil.Of, insecureSkipPlanRootCheck = true).checks["validity"])
+        assertEquals("validity: the PCActn has expired", Pca.verifyPcactn(p, validGrant(), iat + 600001, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        assertEquals(true, Pca.verifyPcactn(p, validGrant(), iat + 600000, KUtil.Of, insecureSkipPlanRootCheck = true).checks["validity"])
         p = mm(Json.parse(raw)); p["counter"] = n("-1")
-        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of)
-        assertEquals(false, g.checks["counter"]); assertEquals("leaf_signature: signature does not verify under the leaf holder key", g.reason)
-        p["counter"] = n("0"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["counter"])
+        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true)
+        assertEquals(false, g.checks["counter_format"]); assertEquals("leaf_signature: signature does not verify under the leaf holder key", g.reason)
+        p["counter"] = n("0"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).checks["counter_format"])
         p = mm(Json.parse(raw)); p["cap_chain"] = ArrayList<Any?>()
-        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of)
+        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true)
         assertEquals("chain: empty chain", g.reason)
-        assertEquals(listOf(false, false, false, true, true), listOf(g.checks["chain"], g.checks["grant_ref_bound"], g.checks["leaf_signature"], g.checks["plan_inclusion"], g.checks["counter"]))
+        assertEquals(listOf(false, false, false, true, true), listOf(g.checks["chain"], g.checks["grant_ref_bound"], g.checks["leaf_signature"], g.checks["plan_inclusion"], g.checks["counter_format"]))
         p = mm(Json.parse(raw)); val first = ll(p["cap_chain"])[0]
         p["cap_chain"] = ArrayList<Any?>().also { c -> repeat(17) { c.add(first) } }
-        assertEquals("chain: chain too long (max 16 hops)", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
+        assertEquals("chain: chain too long (max 16 hops)", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         p["cap_chain"] = ArrayList<Any?>().also { c -> repeat(16) { c.add(first) } }
-        assertEquals("chain: hop 1: broken parent link", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
+        assertEquals("chain: hop 1: broken parent link", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         p = mm(Json.parse(raw)); mm(ll(p["cap_chain"])[0])["caveats"] = ArrayList<Any?>().also { c -> repeat(257) { c.add(m("type" to "t")) } }
-        assertEquals("chain: " + Pca.CAVEAT_LIMIT_REASON, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
+        assertEquals("chain: " + Pca.CAVEAT_LIMIT_REASON, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         p = mm(Json.parse(raw)); val g2 = LinkedHashMap(validGrant()); g2["holder"] = B32
-        assertEquals("chain: chain root is not the grant", Pca.verifyPcactn(p, g2, NOW, KUtil.Of).reason)
+        assertEquals("chain: chain root is not the grant", Pca.verifyPcactn(p, g2, NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         val g4 = LinkedHashMap(validGrant()); g4["weird"] = Any()
-        g = Pca.verifyPcactn(Json.parse(raw), g4, NOW, KUtil.Of)
+        g = Pca.verifyPcactn(Json.parse(raw), g4, NOW, KUtil.Of, insecureSkipPlanRootCheck = true)
         assertTrue(g.reason, g.reason.startsWith("malformed PCActn: java.lang.IllegalArgumentException: canonicalize: unsupported type")); assertFalse(g.allow)
-        assertEquals(true, g.checks["wire"]); assertEquals(true, g.checks["version"]); assertEquals(false, g.checks["chain"]); assertEquals(false, g.checks["counter"]); assertEquals(false, g.checks["leaf_signature"])
+        assertEquals(true, g.checks["wire"]); assertEquals(true, g.checks["version"]); assertEquals(false, g.checks["chain"]); assertEquals(false, g.checks["counter_format"]); assertEquals(false, g.checks["leaf_signature"])
         p = mm(Json.parse(raw)); p["ver"] = n("3")
-        assertEquals("version: unsupported ver (this verifier requires 2)", Pca.verifyPcactn(p, g4, NOW, KUtil.Of).reason)
+        assertEquals("version: unsupported ver (this verifier requires 2)", Pca.verifyPcactn(p, g4, NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
         p = mm(Json.parse(raw)); p["grant_ref"] = B32.replace('q', 'r')
-        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of)
+        g = Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true)
         assertEquals(false, g.checks["grant_ref_bound"]); assertEquals("grant_ref_bound: grant_ref is not the id of the root capability in cap_chain", g.reason)
         p = mm(Json.parse(raw)); mm(p["action"])["verb"] = "other"
-        assertEquals("plan_inclusion: action is not a node of the committed plan", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
-        p = mm(Json.parse(raw)); mm(p["plan"])["node_id"] = "n2x"; assertEquals(false, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["plan_inclusion"])
-        p = mm(Json.parse(raw)); mm(p["plan"]).remove("conditions_digest"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).checks["plan_inclusion"])
+        assertEquals("plan_inclusion: action is not a node of the committed plan", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        p = mm(Json.parse(raw)); mm(p["plan"])["node_id"] = "n2x"; assertEquals(false, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).checks["plan_inclusion"])
+        p = mm(Json.parse(raw)); mm(p["plan"]).remove("conditions_digest"); assertEquals(true, Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).checks["plan_inclusion"])
         p = mm(Json.parse(raw)); p["sig"] = B64
-        assertEquals("leaf_signature: signature does not verify under the leaf holder key", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of).reason)
-        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of, listOf())
+        assertEquals("leaf_signature: signature does not verify under the leaf holder key", Pca.verifyPcactn(p, validGrant(), NOW, KUtil.Of, insecureSkipPlanRootCheck = true).reason)
+        g = Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of, listOf(), insecureSkipPlanRootCheck = true)
         assertEquals("chain: hop 0: signature suite is not allowed by this verifier's suite policy", g.reason); assertEquals(false, g.checks["leaf_signature"])
-        assertTrue(Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of, listOf("ed25519")).allow)
+        assertTrue(Pca.verifyPcactn(Json.parse(raw), validGrant(), NOW, KUtil.Of, listOf("ed25519"), insecureSkipPlanRootCheck = true).allow)
         // Verdict.fail keeps the FIRST reason
         val v = Pca.Verdict(); assertEquals("", v.reason); assertFalse(v.allow)
         v.fail("chain", "bad"); assertEquals("chain: bad", v.reason); assertEquals(false, v.checks["chain"])
@@ -618,27 +627,27 @@ class PcaUnitTest {
     }
 
     @Test fun intentVerify() {
-        val base = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+        val base = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format")
         val raw = vec("valid-raw-json-format-insensitive")["pcactn_json"] as String
         val of = Pca.Audience.Of(AUD)
-        var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of)
+        var g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, insecureSkipPlanRootCheck = true)
         assertTrue(g.allow); assertEquals(base, g.checks.keys.toList())
-        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = false))
+        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = false), insecureSkipPlanRootCheck = true)
         assertTrue(g.allow); assertEquals(base, g.checks.keys.toList())
-        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true))
+        g = Pca.verifyPcactnJson(raw, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true), insecureSkipPlanRootCheck = true)
         assertFalse(g.allow)
         assertEquals(base + "intent", g.checks.keys.toList())
         assertEquals(false, g.checks["intent"])
         assertEquals("intent: this verifier requires an intent binding but the PCActn carries none", g.reason)
         val p = valid()
         p["intent"] = intentSlot()
-        g = Pca.verifyPcactn(p, validGrant(), NOW, of)
+        g = Pca.verifyPcactn(p, validGrant(), NOW, of, insecureSkipPlanRootCheck = true)
         assertEquals(base + "intent", g.checks.keys.toList())
         assertEquals(true, g.checks["wire"]); assertEquals(false, g.checks["leaf_signature"]); assertEquals(false, g.checks["intent"])
         val bound = LinkedHashMap(validGrant()).also { it["caveats"] = intentGrant(intentCommit)["caveats"] }
-        assertEquals(true, Pca.verifyPcactn(p, bound, NOW, of).checks["intent"])
+        assertEquals(true, Pca.verifyPcactn(p, bound, NOW, of, insecureSkipPlanRootCheck = true).checks["intent"])
         p["intent"] = null
-        g = Pca.verifyPcactn(p, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true))
+        g = Pca.verifyPcactn(p, validGrant(), NOW, of, intentPolicy = Pca.IntentPolicy(require = true), insecureSkipPlanRootCheck = true)
         assertEquals(listOf("wire"), g.checks.keys.toList())
         assertEquals("wire: 'intent' must be an object", g.reason)
     }
@@ -653,7 +662,7 @@ class PcaUnitTest {
     private val iNone = "this verifier requires an intent binding but the PCActn carries none"
     private val iNoEnv = "the root grant carries no envelope goal commitment to bind the intent to"
     private val iOpen = "intent ref / map_digest / goal_salt do not open the root grant's goal commitment"
-    private val baseKeys = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter")
+    private val baseKeys = listOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format")
     private val intentKeys = baseKeys + "intent"
 
     private fun slotWith(k: String, v: Any?) = intentSlot().also { it[k] = v }
@@ -803,52 +812,52 @@ class PcaUnitTest {
     @Test fun intentKillVerifySigned() {
         val of = Pca.Audience.Of(AUD)
         val root = intentRoot()
-        var g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of)
+        var g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, insecureSkipPlanRootCheck = true)
         assertTrue(g.reason, g.allow)
         assertEquals(baseKeys, g.checks.keys.toList())
-        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol())
+        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol(), insecureSkipPlanRootCheck = true)
         assertTrue(g.allow); assertEquals(baseKeys, g.checks.keys.toList())
-        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol(min = 0.0))
+        g = Pca.verifyPcactn(signedWithIntent(root, null), root, NOW, of, intentPolicy = pol(min = 0.0), insecureSkipPlanRootCheck = true)
         assertFalse(g.allow); assertEquals(intentKeys, g.checks.keys.toList())
         assertEquals("intent: $iNone", g.reason)
         val p = signedWithIntent(root, intentSlot())
-        g = Pca.verifyPcactn(p, root, NOW, of)
+        g = Pca.verifyPcactn(p, root, NOW, of, insecureSkipPlanRootCheck = true)
         assertTrue(g.reason, g.allow)
         assertEquals("", g.reason)
         assertEquals(intentKeys, g.checks.keys.toList())
         assertEquals(true, g.checks["intent"])
-        assertTrue(Pca.verifyPcactnJson(Json.canonicalizeStrict(p), root, NOW, of, intentPolicy = pol(require = true)).allow)
-        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(true, 950000.0, 4310000.0)).allow)
-        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = 950001.0))
+        assertTrue(Pca.verifyPcactnJson(Json.canonicalizeStrict(p), root, NOW, of, intentPolicy = pol(require = true), insecureSkipPlanRootCheck = true).allow)
+        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(true, 950000.0, 4310000.0), insecureSkipPlanRootCheck = true).allow)
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = 950001.0), insecureSkipPlanRootCheck = true)
         assertFalse(g.allow)
         assertEquals("intent: intent fidelity 950000 ppm is below the policy minimum 950001", g.reason)
         for (k in baseKeys) assertEquals(k, true, g.checks[k])
-        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(max = 4309999.0))
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(max = 4309999.0), insecureSkipPlanRootCheck = true)
         assertFalse(g.allow); assertEquals(false, g.checks["intent"])
-        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = -1.0))
+        g = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = pol(min = -1.0), insecureSkipPlanRootCheck = true)
         assertFalse(g.allow); assertEquals("intent: $iMis", g.reason)
         val edge = intentSlot().also { it["fidelity_ppm"] = n("1000000"); it["residual_risk_ppm"] = n("0") }
-        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of).allow)
+        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of, insecureSkipPlanRootCheck = true).allow)
         edge["fidelity_ppm"] = n("0"); edge["residual_risk_ppm"] = n("9007199254740991")
-        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of).allow)
+        assertTrue(Pca.verifyPcactn(signedWithIntent(root, edge), root, NOW, of, insecureSkipPlanRootCheck = true).allow)
         // signed: tampering after signing breaks leaf_signature while the binding itself still holds
         val t = signedWithIntent(root, intentSlot())
         mm(t["intent"])["fidelity_ppm"] = n("999999")
-        g = Pca.verifyPcactn(t, root, NOW, of)
+        g = Pca.verifyPcactn(t, root, NOW, of, insecureSkipPlanRootCheck = true)
         assertFalse(g.allow)
         assertEquals(false, g.checks["leaf_signature"])
         assertEquals(true, g.checks["intent"])
         assertEquals(intentKeys, g.checks.keys.toList())
         val s = signedWithIntent(root, intentSlot()).also { it.remove("intent") }
-        g = Pca.verifyPcactn(s, root, NOW, of)
+        g = Pca.verifyPcactn(s, root, NOW, of, insecureSkipPlanRootCheck = true)
         assertEquals(false, g.checks["leaf_signature"])
         assertEquals(baseKeys, g.checks.keys.toList())
-        g = Pca.verifyPcactn(signedWithIntent(root, slotWith("goal_salt", "other")), root, NOW, of)
+        g = Pca.verifyPcactn(signedWithIntent(root, slotWith("goal_salt", "other")), root, NOW, of, insecureSkipPlanRootCheck = true)
         assertEquals("intent: $iOpen", g.reason)
         for (k in baseKeys) assertEquals(k, true, g.checks[k])
         for (bad in listOf<Any?>(null, "x", l(), slotWith("fidelity_ppm", n("1000001")), slotWith("residual_risk_ppm", n("-1")), slotWith("goal_salt", "é".repeat(64) + "a"))) {
             val w = signedWithIntent(root, intentSlot()).also { it["intent"] = bad }
-            g = Pca.verifyPcactn(w, root, NOW, of, intentPolicy = pol(require = true))
+            g = Pca.verifyPcactn(w, root, NOW, of, intentPolicy = pol(require = true), insecureSkipPlanRootCheck = true)
             assertFalse(g.allow)
             assertEquals("$bad", listOf("wire"), g.checks.keys.toList())
             assertTrue(g.reason, g.reason.startsWith("wire: "))
@@ -887,8 +896,8 @@ class PcaUnitTest {
         val of = Pca.Audience.Of(AUD)
         val root = intentRoot()
         val p = signedWithIntent(root, intentSlot())
-        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.0,\"max_residual_risk_ppm\":4.31e6}")).allow)
-        val v = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.5}"))
+        assertTrue(Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.0,\"max_residual_risk_ppm\":4.31e6}"), insecureSkipPlanRootCheck = true).allow)
+        val v = Pca.verifyPcactn(p, root, NOW, of, intentPolicy = Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":950000.5}"), insecureSkipPlanRootCheck = true)
         assertFalse(v.allow)
         assertEquals("intent: $iMis", v.reason)
         assertThrows(RuntimeException::class.java) { Pca.IntentPolicy.fromJsonText("{\"min_fidelity_ppm\":}") }

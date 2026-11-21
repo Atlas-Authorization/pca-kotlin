@@ -1,0 +1,78 @@
+name: Bytecode
+
+# Reads the compiled (compiler-generated) code of the ktor plugin and the other surface classes with javap, so a coroutine
+# state-machine mutant (label store, spilled local, throwOnFailure) can be tied to the instruction PIT mutated. Output only.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/0.5.0-bytecode']
+
+permissions:
+  contents: read
+
+jobs:
+  javap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      JDK_JAVA_OPTIONS: --enable-native-access=ALL-UNNAMED
+      CRATE: kotlin-pca
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        id: jdk
+        continue-on-error: true  # a transient download failure must not leave the later steps on the runner's default JDK
+        with:
+          distribution: temurin
+          java-version: '23'
+          cache: maven
+      - name: JDK 23 again from another vendor when the first setup failed
+        if: steps.jdk.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '23'
+          cache: maven
+      - name: The job runs on JDK 23 (the Kotlin compiler of the pom rejects the runner's default JDK 25 version string)
+        shell: bash
+        run: |
+          java -version 2>&1
+          java -version 2>&1 | grep -q 'version "23' || { echo "::error::JDK 23 is not the active JDK"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout
+        env:
+          LESS: '1'
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Compile
+        continue-on-error: true
+        working-directory: ${{ env.MONO }}/sdks/kotlin-pca
+        run: mvn -B -ntp -q test-compile
+      - name: javap
+        if: ${{ always() }}
+        working-directory: ${{ env.MONO }}/sdks/kotlin-pca
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bytecode"
+          for c in target/classes/net/atlasauth/pca/ktor/PcaGuardPlugin*.class target/classes/net/atlasauth/pca/ktor/Protect*.class target/classes/net/atlasauth/pca/guard/GuardOutcome.class target/classes/net/atlasauth/pca/spring/*.class target/classes/net/atlasauth/pca/guard/*.class target/classes/net/atlasauth/pca/verifier/Authorize*.class target/classes/net/atlasauth/pca/stepup/*.class target/classes/net/atlasauth/pca/verifier/CaveatLang*.class target/classes/net/atlasauth/pca/verifier/PolicyAuthoring.class target/classes/net/atlasauth/pca/verifier/AttestUtil.class target/classes/net/atlasauth/pca/verifier/Pq.class target/classes/net/atlasauth/pca/verifier/Pq\$Suite.class target/classes/net/atlasauth/pca/verifier/SafeRegex.class target/classes/net/atlasauth/pca/verifier/SafeRegex\$*.class target/classes/net/atlasauth/pca/verifier/Ledger.class target/classes/net/atlasauth/pca/verifier/AttestCert.class target/classes/net/atlasauth/pca/verifier/Actions.class target/classes/net/atlasauth/pca/verifier/IntentMap.class target/classes/net/atlasauth/pca/verifier/Prohibitions.class; do
+            [ -f "$c" ] || continue
+            javap -c -p -l -constants "$c" > "$GITHUB_WORKSPACE/bytecode/$(basename "$c").txt"
+          done
+          ls -la "$GITHUB_WORKSPACE/bytecode" | head -40
+      - name: javap of the library classes the proofs lean on (the jars the pom resolved)
+        if: ${{ always() }}
+        working-directory: ${{ env.MONO }}/sdks/kotlin-pca
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bytecode/lib"
+          mvn -B -ntp -q dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt
+          tr ':' '\n' < /tmp/cp.txt > "$GITHUB_WORKSPACE/bytecode/lib/classpath.txt"
+          dump() { javap -c -p -l -constants -classpath "$(cat /tmp/cp.txt)" "$1" > "$GITHUB_WORKSPACE/bytecode/lib/$1.txt" 2>&1 || true; }
+          for c in io.ktor.server.request.ApplicationReceiveFunctionsKt io.ktor.server.request.ApplicationReceiveFunctionsKt\$receive\$1 io.ktor.server.request.ApplicationReceivePipeline io.ktor.server.request.ApplicationReceiveRequest io.ktor.server.application.ApplicationCallPipeline io.ktor.util.pipeline.PipelineContext \
+                   kotlinx.serialization.json.JsonElementKt kotlinx.serialization.json.JsonElement okhttp3.Request\$Builder okhttp3.Request okhttp3.Response okhttp3.ResponseBody okhttp3.internal.connection.RealCall okhttp3.internal.http.CallServerInterceptor okhttp3.internal.http.BridgeInterceptor okhttp3.internal.http.RetryAndFollowUpInterceptor okhttp3.Response\$Builder okio.RealBufferedSource okio.RealBufferedSource\$inputStream\$1 okio.Okio okio.Buffer; do
+            dump "$c"
+          done
+          ls -la "$GITHUB_WORKSPACE/bytecode/lib" | head -30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bytecode
+          path: bytecode
