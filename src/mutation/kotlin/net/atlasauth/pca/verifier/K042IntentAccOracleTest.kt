@@ -81,9 +81,9 @@ class K042IntentAccOracleTest {
         IntentAcc.verifyReceiptAgainstHolder(m(it[0]), m(it[1]), it[2], d(it[3]), d(it[4]), d(it[5]), it[6])
     }
 
-    @Test fun monitorStatesOfAnUnknownKindIsEmpty() {
-        assertEquals(emptyList<String>(), IntentAcc.monitorStates(m(Json.parseLenient("{\"kind\":\"other\"}"))))
-        assertEquals(emptyList<String>(), IntentAcc.monitorStates(m(Json.parseLenient("{}"))))
+    @Test fun monitorStatesOfAnUnknownKindIsUndefined() {
+        assertEquals(null, IntentAcc.monitorStates(m(Json.parseLenient("{\"kind\":\"other\"}")) as Any?))
+        assertEquals(null, IntentAcc.monitorStates(m(Json.parseLenient("{}")) as Any?))
     }
 
     @Test fun verifyKeySetPinsOnlyWhenTheRootPqKeyIsPresent() {

@@ -56,7 +56,7 @@ class KillGTest {
     @Test fun value() = check("value") { c ->
         val got = ActionSchema.paramValueViolation(j(c["decl"]) as Map<String, Any?>, j(c["x"]))
         val w = c["want"] as Map<String, Any?>?
-        val want = w?.let { it["code"] to it["reason"] }
+        val want = w?.let { it["code"] to (it["ts_reason"] ?: it["reason"]) }
         if (got == want) null else "got <$got> want <$want>"
     }
 

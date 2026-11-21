@@ -13,9 +13,10 @@ object KUtil {
     @Suppress("UNCHECKED_CAST") fun ll(o: Any?): MutableList<Any?> = o as MutableList<Any?>
 
     fun <T> priv(target: Any, name: String, vararg args: Any?): T {
-        val cands = target.javaClass.declaredMethods.filter { it.name == name && it.parameterCount == args.size }
+        val cands = target.javaClass.declaredMethods.filter { (it.name == name || it.name.startsWith("$name$")) && it.parameterCount == args.size }
         require(cands.isNotEmpty()) { "no method $name/${args.size}" }
-        val method = cands.first().also { it.isAccessible = true }
+        // an exact name beats synthetic "name$lambda" helpers; declaredMethods order is JVM-dependent
+        val method = (cands.firstOrNull { it.name == name } ?: cands.first()).also { it.isAccessible = true }
         try {
             @Suppress("UNCHECKED_CAST") return method.invoke(target, *args) as T
         } catch (e: InvocationTargetException) { throw e.targetException }

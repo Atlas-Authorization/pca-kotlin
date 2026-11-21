@@ -347,6 +347,69 @@ object SafeRegex {
         }
     }
 
+    // ---- the one bounded compiled-program cache (regex-cache.ts) ----
+    const val REGEX_CACHE_MAX_ENTRIES = 512
+    const val REGEX_CACHE_MAX_PER_SOURCE = 64
+    const val REGEX_CACHE_MAX_WEIGHT = 131_072
+
+    private class CacheEntry(val value: Compiled?, val source: String, val weight: Int)
+
+    private val cache = LinkedHashMap<String, CacheEntry>(16, 0.75f, true) // least-recently-used first
+    private var cacheWeight = 0
+
+    /** The source (the server's client key) of the innermost open budget, walking document budgets up to the request budget. */
+    private fun currentSource(): String {
+        var b: RegexBudget? = ambient()
+        while (b != null) {
+            b.source?.let { return it }
+            b = b.parentBudget
+        }
+        return ""
+    }
+
+    private fun evict(key: String) {
+        val e = cache.remove(key) ?: return
+        cacheWeight -= e.weight
+    }
+
+    private fun weight(c: Compiled?): Int {
+        if (c == null) return 1
+        var w = c.program.size
+        for (ins in c.program) if (ins.set != null) w += ins.set.ranges.size
+        return w
+    }
+
+    /**
+     * [compile] through ONE bounded LRU: eviction is least-recently-used one entry at a time (never cleared wholesale), a source that
+     * owns [REGEX_CACHE_MAX_PER_SOURCE] entries replaces its OWN oldest, a total weight cap bounds memory and a program heavier than a
+     * sixteenth of it is used but never cached. A pattern outside the subset (null) is cached too.
+     */
+    fun compileCached(src: String): Compiled? {
+        synchronized(cache) {
+            val hit = cache[src]
+            if (hit != null) return hit.value
+        }
+        val value = compile(src)
+        val w = Math.max(1, weight(value))
+        if (w > REGEX_CACHE_MAX_WEIGHT / 16) return value
+        val source = currentSource()
+        synchronized(cache) {
+            if (cache.containsKey(src)) return value
+            while (cache.values.count { it.source == source } >= REGEX_CACHE_MAX_PER_SOURCE) {
+                evict(cache.entries.first { it.value.source == source }.key)
+            }
+            while (cache.isNotEmpty() && (cache.size >= REGEX_CACHE_MAX_ENTRIES || cacheWeight + w > REGEX_CACHE_MAX_WEIGHT)) {
+                evict(cache.keys.first())
+            }
+            cache[src] = CacheEntry(value, source, w)
+            cacheWeight += w
+        }
+        return value
+    }
+
+    /** Whether pattern [src] is currently cached (tests and diagnostics). */
+    fun cacheHas(src: String): Boolean = synchronized(cache) { cache.containsKey(src) }
+
     /** Full-match `subject`: true / false, or null when the work budget would be exceeded. */
     fun run(re: Compiled, subject: String): Boolean? {
         val prog = re.program
@@ -506,22 +569,42 @@ object SafeRegex {
     /** `Math.ceil(Math.log2(n))` for an integer n >= 2, computed exactly. */
     internal fun ceilLog2(n: Long): Int = 64 - java.lang.Long.numberOfLeadingZeros(n - 1)
 
-    // ---- per-document budget (regex-budget.ts) ----
-    /** One document's regex work budget. */
-    internal class Budget {
-        var evaluations = 0
-        var chars = 0
-        var steps = 0L
-        var refusals = 0
+    // ---- per-document and per-request budget (regex-budget.ts) ----
+    /** A request-level budget allows this many documents' worth of regex work in total. */
+    const val REGEX_REQUEST_SCALE = 4
 
+    /**
+     * A regex work budget. A DOCUMENT budget (opened by every library entry point) is fresh per document so a verdict is a pure
+     * function of (document, subject). A REQUEST budget ([request], run through [run]) is opened once per HTTP request: every document
+     * budget opened inside it ALSO charges it, with caps [REGEX_REQUEST_SCALE] documents' worth. Outside any scope a call is charged
+     * to a fresh single-use budget, never "unbudgeted".
+     */
+    class RegexBudget internal constructor(private val scale: Int = 1, private val parent: RegexBudget? = null, val isDocument: Boolean = true, val source: String? = null) {
+        /** The enclosing budget this one also charges (null for a top-level budget). */
+        val parentBudget: RegexBudget? get() = parent
+
+        var evaluations = 0
+            internal set
+        var chars = 0
+            internal set
+        var steps = 0L
+            internal set
+
+        /** Evaluations refused so far (a veto or guard must treat a refusal as "could not decide", fail closed). */
+        var refusals = 0
+            internal set
+
+        /** Charge one evaluation of [src] against a subject of [subjectLen] code units; false = refused (the caller must NOT match). */
         fun charge(src: String, subjectLen: Int): Boolean {
-            val c = compile(src)
+            val c = compileCached(src)
             if (c == null) { refusals++; return false }
             val ev = evaluations + 1
             val ch = chars + src.length
             val st = steps + c.size().toLong() * (subjectLen + 1)
-            if (ev > MAX_REGEX_EVALUATIONS_PER_DOCUMENT || ch > MAX_REGEX_SOURCE_CHARS_PER_DOCUMENT || st > MAX_REGEX_STEPS_PER_DOCUMENT) {
-                evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 1 // poison: order-independent refusal
+            if (ev > MAX_REGEX_EVALUATIONS_PER_DOCUMENT * scale || ch > MAX_REGEX_SOURCE_CHARS_PER_DOCUMENT * scale ||
+                st > MAX_REGEX_STEPS_PER_DOCUMENT.toLong() * scale || (parent != null && !parent.charge(src, subjectLen))
+            ) {
+                evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT * scale + 1 // poison: order-independent refusal
                 refusals++
                 return false
             }
@@ -530,21 +613,62 @@ object SafeRegex {
             steps = st
             return true
         }
-    }
 
-    private val CURRENT = ThreadLocal<Budget?>()
+        /** Make this the open scope of the calling thread for [fn] (the previous scope is restored afterwards). */
+        fun <T> run(fn: () -> T): T {
+            val prev = CURRENT.get()
+            CURRENT.set(this)
+            try {
+                return fn()
+            } finally {
+                if (prev == null) CURRENT.remove() else CURRENT.set(prev)
+            }
+        }
 
-    /** Run `fn` inside the open document budget, or a fresh one when none is open (withRegexBudget). */
-    internal fun <T> withBudget(fn: () -> T): T {
-        if (CURRENT.get() != null) return fn()
-        CURRENT.set(Budget())
-        try {
-            return fn()
-        } finally {
-            CURRENT.remove()
+        companion object {
+            /** A request-scoped budget: run the request's regex-evaluating sections through [run]. */
+            @JvmStatic
+            @JvmOverloads
+            fun request(source: String? = null): RegexBudget = RegexBudget(REGEX_REQUEST_SCALE, null, false, source)
         }
     }
 
+    private val CURRENT = ThreadLocal<RegexBudget?>()
+
+    @Volatile private var provider: (() -> RegexBudget?)? = null
+
+    /**
+     * Install an AMBIENT request-budget provider (a server passes a lookup of its per-request context). Every document budget opened
+     * with no explicit enclosing request scope chains to it, so a server bounds ALL regex work of a request without threading a budget
+     * through each call. `null` uninstalls.
+     */
+    @JvmStatic
+    fun setRegexBudgetProvider(fn: (() -> RegexBudget?)?) {
+        provider = fn
+    }
+
+    private fun ambient(): RegexBudget? {
+        val cur = CURRENT.get()
+        if (cur != null) return cur
+        return try { provider?.invoke() } catch (e: RuntimeException) { null }
+    }
+
+    /** Run `fn` inside the open document budget, or a fresh one when none is open (withRegexBudget). */
+    internal fun <T> withBudget(fn: () -> T): T {
+        val open = CURRENT.get()
+        if (open != null && open.isDocument) return fn()
+        // a new document budget: chained to the enclosing request budget (open scope or the ambient provider), if any
+        val doc = RegexBudget(1, open ?: ambient(), true, null)
+        return doc.run(fn)
+    }
+
+    /** Regex evaluations refused so far by the open document budget (0 when none is open): the reference's `regexRefusals`. */
+    internal fun refusals(): Int = CURRENT.get()?.refusals ?: 0
+
     /** Charge one evaluation of `src` against a subject of `subjectLen` code units (chargeRegex). */
-    internal fun charge(src: String, subjectLen: Int): Boolean = (CURRENT.get() ?: Budget()).charge(src, subjectLen)
+    internal fun charge(src: String, subjectLen: Int): Boolean {
+        val open = CURRENT.get()
+        if (open != null) return open.charge(src, subjectLen)
+        return RegexBudget(1, ambient(), true, null).charge(src, subjectLen)
+    }
 }

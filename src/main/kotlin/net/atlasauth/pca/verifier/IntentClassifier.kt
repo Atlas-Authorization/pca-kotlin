@@ -5,6 +5,7 @@ package net.atlasauth.pca.verifier
  * `pca-intent-classification` is signed by its `judge` key, which must be on the classifier's allowlist; per classifier
  * exactly one label must reach the k-of-n quorum of distinct judges. First failure wins; never throws.
  */
+@Suppress("UNCHECKED_CAST")
 object IntentClassifier {
     const val INTENT_CLASSIFIER_DOMAIN = "atlas-pca/intent-classifier/v1\u0000"
     const val INTENT_CLASSIFIER_REF_DOMAIN = "atlas-pca/intent-classifier-ref/v1"
@@ -12,7 +13,7 @@ object IntentClassifier {
     const val MAX_CLASSIFIER_LABELS = 32
 
     /** The rule-18 verdict: `classes` maps each classifier id to its quorum label. */
-    class ClassResult internal constructor(val ok: Boolean, val reason: String?, val classes: Map<String, Any?>?) {
+    class ClassResult internal constructor(val ok: Boolean, val reason: String?, val classes: Map<String, Any?>?, val votes: Map<String, Map<String, Int>>? = null) {
         internal companion object {
             fun fail(reason: String) = ClassResult(false, "classes: $reason", null)
         }
@@ -142,9 +143,65 @@ object IntentClassifier {
                 if (winners.size > 1) return ClassResult.fail("classifier '$id': ambiguous, ${winners.size} labels reach the quorum")
                 classes[id] = winners[0]
             }
-            return ClassResult(true, null, classes)
+            return ClassResult(true, null, classes, votes)
         } catch (e: RuntimeException) {
             return ClassResult.fail("evaluation error (fail closed): " + e.javaClass.simpleName)
+        }
+    }
+
+    // ---- the reference's own surface ----
+
+    /** Wire validation of a classifier verdict: null = well-formed. */
+    @JvmStatic fun validateClassifierVerdictWire(v: Any?): String? = validateVerdictWire(v)
+
+    /** The content digest a verdict binds: `b64u(sha256(strictCanonical(value)))`. */
+    @JvmStatic fun classifierContentDigest(value: Any?): String = Pca.hashCanonical(IntentJs.normalize(value))
+
+    /**
+     * Sign a verdict (the classifier's side) as `signer` (Ed25519, ML-DSA-65 or hybrid): `body` is `{classifier, session, content_digest, label, measurement}`;
+     * `judge` is derived from the signer's Ed25519 identity. A non-default suite adds `alg` and `pq_pk` (signed) and, for a hybrid, `pq_sig`.
+     */
+    @JvmStatic fun signClassifierVerdict(body: Map<String, Any?>, signer: Keys.SuiteKey): Map<String, Any?> {
+        val full = LinkedHashMap<String, Any?>()
+        full["v"] = Json.Num("1")
+        full["kind"] = "pca-intent-classification"
+        full.putAll(body)
+        full["judge"] = (signer.ed ?: throw IllegalArgumentException("signClassifierVerdict: the classifier needs an Ed25519 identity")).id()
+        return Issue.signArtifact(INTENT_CLASSIFIER_DOMAIN, full, signer)
+    }
+
+    /** The content address committed in `intent_session.classes[]`. */
+    @JvmStatic fun classifierVerdictRef(v: Any?): String = IntentArtifacts.artifactRef(INTENT_CLASSIFIER_REF_DOMAIN, "c", IntentJs.normalize(v))
+
+    /** Policy sanity (rule 18 step 0): null = well-formed. */
+    @JvmStatic fun validateClassifierPolicy(p: Any?): String? = validatePolicy(p)
+
+    /** Is the rule-18 check active? Iff `committed` or `policy.classifiers` of the input object is a non-empty list. */
+    @JvmStatic fun classifierCheckActive(input: Any?): Boolean =
+        input is Map<*, *> && (OracleFacts.nonEmpty(IntentJs.get(input, "committed")) || OracleFacts.nonEmpty(IntentJs.get(IntentJs.get(input, "policy"), "classifiers")))
+
+    /**
+     * Rule 18 over `{session, action, committed?, verdicts?, policy}` (first failure wins; never throws): `{ok: true, classes, votes}` with the quorum label of each
+     * classifier and the vote tallies, or `{ok: false, reason}`.
+     */
+    @JvmStatic fun decideClassifierDimensions(input: Any?): Map<String, Any?> {
+        val r = if (input !is Map<*, *>) ClassResult.fail("input must be an object") else decide(input)
+        if (!r.ok) return linkedMapOf("ok" to false, "reason" to r.reason)
+        val votes = LinkedHashMap<String, Any?>()
+        for ((id, t) in r.votes ?: emptyMap()) votes[id] = LinkedHashMap<String, Any?>(t.mapValues { Json.Num(it.value.toString()) })
+        return linkedMapOf("ok" to true, "classes" to r.classes, "votes" to votes)
+    }
+
+    /**
+     * Bind a verdict's signed `measurement` to a verified TEE exactly as a judge is bound ([net.atlasauth.pca.intent.IntentSemantic.verifyJudgeAttestation]): the attested-classifier
+     * gate (not part of rule 18) for building the `measurements` pin set or dropping verdicts whose enclave is not approved.
+     */
+    @JvmStatic fun verifyClassifierAttestation(v: Any?, attestation: Any?, approved: Any?): Map<String, Any?> {
+        if (v !is Map<*, *>) return linkedMapOf("ok" to false, "reason" to "verdict must be an object")
+        return try {
+            net.atlasauth.pca.intent.IntentSemantic.verifyJudgeAttestation(v["measurement"], attestation, approved)
+        } catch (e: RuntimeException) {
+            linkedMapOf("ok" to false, "reason" to "attestation check error (fail closed): ${e.message ?: "unknown"}")
         }
     }
 }

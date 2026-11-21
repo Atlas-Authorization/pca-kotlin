@@ -10,7 +10,7 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519
  * Native Kotlin reference verifier for the CORE PCActn checks, wire format v2. Byte-matches `@atlasauth/pca`
  * (the TypeScript source of truth) and the sibling language verifiers (java-pca, go-pca, python-pca, ...).
  *
- * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter`, then
+ * Normative check order: `wire, version, audience, validity, chain, plan_inclusion, leaf_signature, counter_format`, then
  * `intent` when evaluated (Intent Layer M2, see [IntentPolicy]) (a wire failure is terminal). Requires BouncyCastle (`org.bouncycastle.math.ec.rfc8032.Ed25519`), which the
  * module already depends on for the step-up client.
  *
@@ -44,15 +44,15 @@ object Pca {
     fun artifactTooLarge(text: String): Boolean {
         if (text.length > MAX_ARTIFACT_BYTES) return true
         if (text.length.toLong() * 3 <= MAX_ARTIFACT_BYTES) return false
-        return text.toByteArray(Charsets.UTF_8).size > MAX_ARTIFACT_BYTES
+        return Json.utf8(text).size > MAX_ARTIFACT_BYTES
     }
     const val MAX_LIFETIME_MS = 3_600_000L
     const val MAX_SKEW_MS = 60_000L
     const val MAX_AUD_LEN = 256
     const val MAX_NONCE_LEN = 128
 
-    val SIG_DOMAIN: ByteArray = "atlas-pca/actn/v2\u0000".toByteArray(StandardCharsets.UTF_8)
-    val CAP_DOMAIN: ByteArray = "atlas-pca/cap/v1\u0000".toByteArray(StandardCharsets.UTF_8)
+    val SIG_DOMAIN: ByteArray = "atlas-pca/actn/v2\u0000".toByteArray(Charsets.UTF_8)
+    val CAP_DOMAIN: ByteArray = "atlas-pca/cap/v1\u0000".toByteArray(Charsets.UTF_8)
     const val DEFAULT_REV = "reversible"
 
     /**
@@ -71,6 +71,8 @@ object Pca {
 
     // ---- Intent Layer M2: envelope.intent ----
     const val INTENT_GOAL_PREFIX = "pca-intent:v1:"
+    /** Goal binding v3: `pca-intent:v3:<goal_digest>:<policy_digest>` (the signed Goal IR and the policy compiled from it). */
+    const val INTENT_GOAL_V3_PREFIX = "pca-intent:v3:"
     /** Domain of the root grant's salted goal commitment (envelope goal_commit). */
     const val INTENT_GOAL_COMMIT_DOMAIN = "atlas-pca/goal/v1\u0000"
     const val PPM_ONE = 1_000_000L
@@ -91,9 +93,11 @@ object Pca {
         val minFidelityPpm: Double? = null,
         /** Deny when the claimed `residual_risk_ppm` is above this (null = unset). Setting it implies require. */
         val maxResidualRiskPpm: Double? = null,
+        /** Goal binding v3: the root grant must open against exactly this Goal IR + compiled policy. Setting it implies require. */
+        val approvedGoal: ApprovedGoal? = null,
     ) {
         /** True iff the policy is active (the intent check runs even for a PCActn without the field). */
-        val isActive: Boolean get() = require || minFidelityPpm != null || maxResidualRiskPpm != null
+        val isActive: Boolean get() = require || minFidelityPpm != null || maxResidualRiskPpm != null || approvedGoal != null
 
         companion object {
             /**
@@ -103,7 +107,10 @@ object Pca {
              */
             fun fromJson(o: Any?): IntentPolicy? {
                 if (o !is Map<*, *>) return null
-                return IntentPolicy(o["require"] == true, threshold(o, "min_fidelity_ppm"), threshold(o, "max_residual_risk_ppm"))
+                return IntentPolicy(
+                    o["require"] == true, threshold(o, "min_fidelity_ppm"), threshold(o, "max_residual_risk_ppm"),
+                    if (o.containsKey("approved_goal")) ApprovedGoal.fromJson(o["approved_goal"]) else null,
+                )
             }
 
             /**
@@ -124,6 +131,32 @@ object Pca {
             }
         }
     }
+
+    /**
+     * The digests a v3 goal commitment binds: canonical base64url (32 bytes) of the signed Goal IR and of the compiled policy.
+     * [closed] is false when the configured object had a member other than exactly `goal_digest` and `policy_digest` (or was
+     * not an object): such a policy is a misconfiguration and fails closed, as does a short, padded or empty digest.
+     */
+    class ApprovedGoal(val goalDigest: String?, val policyDigest: String?, val closed: Boolean = true) {
+        val isWellFormed: Boolean get() = closed && decodeB64uStrict(goalDigest, 32) != null && decodeB64uStrict(policyDigest, 32) != null
+
+        companion object {
+            /** From a parsed JSON value; anything but an object of exactly the two members yields a malformed (fail-closed) ref. */
+            fun fromJson(o: Any?): ApprovedGoal =
+                if (o is Map<*, *>) ApprovedGoal(o["goal_digest"] as? String, o["policy_digest"] as? String, o.size == 2)
+                else ApprovedGoal(null, null, false)
+        }
+    }
+
+    /** The v3 goal string. Throws [IllegalArgumentException] on a malformed digest: never commit to garbage. */
+    fun intentGoalV3(ref: ApprovedGoal): String {
+        require(ref.isWellFormed) { "intentGoalV3: goal_digest and policy_digest must be canonical base64url (32 bytes)" }
+        return INTENT_GOAL_V3_PREFIX + ref.goalDigest + ":" + ref.policyDigest
+    }
+
+    /** The v3 goal commitment for a salt (same domain and hash as [intentGoalCommit]). */
+    fun intentGoalCommitV3(ref: ApprovedGoal, goalSalt: String): String =
+        hashCanonical(linkedMapOf<String, Any?>("d" to INTENT_GOAL_COMMIT_DOMAIN, "goal" to intentGoalV3(ref), "salt" to goalSalt))
 
     /** A set policy threshold must be a safe integer >= 0 (finite, integral, not -0, <= 2^53-1). */
     internal fun okThreshold(x: Double?): Boolean {
@@ -197,10 +230,17 @@ object Pca {
         return try {
             if (active && (!okThreshold(policy!!.minFidelityPpm) || !okThreshold(policy.maxResidualRiskPpm)))
                 return "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)"
+            val v3 = policy?.approvedGoal
+            if (v3 != null && !v3.isWellFormed) // a non-null approvedGoal makes the policy active
+                return "intent policy misconfigured: approved_goal digests must be canonical base64url (32 bytes) (fail closed)"
             if (!present) return "this verifier requires an intent binding but the PCActn carries none"
             val commit = rootGoalCommit(grant) ?: return "the root grant carries no envelope goal commitment to bind the intent to"
             val i = intent as Map<*, *>
-            val opened = if (session != null) {
+            if (v3 != null) {
+                if (intentGoalCommitV3(v3, i["goal_salt"] as String) != commit)
+                    return "the root grant's goal commitment does not open to the approved goal and compiled policy (v3)"
+            }
+            val opened = if (v3 != null) commit else if (session != null) {
                 if (mapForm == IntentMap.MAP_FORM_COMMIT) intentGoalCommitV2c(session, i["map_digest"] as String, i["goal_salt"] as String)
                 else intentGoalCommitV2(session, i["map_digest"] as String, i["goal_salt"] as String)
             }
@@ -223,9 +263,19 @@ object Pca {
     class Verdict {
         var allow = false
         val checks = LinkedHashMap<String, Boolean>()
+
+        /** Checks the verifier was told not to enforce (an explicit opt-out): they have no pass / fail entry in [checks]. */
+        val notEnforced: MutableSet<String> = LinkedHashSet()
         var reason = ""
+
+        /** EVERY failing check's reason (`<check>: <why>`), in check order: the ternary decision reads the full set, not the first. */
+        val reasons: MutableList<String> = ArrayList()
+
+        /** Rule 21 `legacy` model polarity was in effect: the verdict is degraded (a strict verifier must not rely on it). */
+        var legacyModelPolarity = false
         internal fun fail(name: String, why: String) {
             checks[name] = false
+            reasons.add("$name: $why")
             if (reason.isEmpty()) reason = "$name: $why"
         }
     }
@@ -243,6 +293,7 @@ object Pca {
      */
     fun decodeB64uStrict(o: Any?, len: Int): ByteArray? {
         if (o !is String) return null
+        // the alphabet, refused here though B64U_DEC would also throw on it (defence in depth)
         for (c in o) {
             val ok = (c in 'A'..'Z') || (c in 'a'..'z') || (c in '0'..'9') || c == '-' || c == '_'
             if (!ok) return null
@@ -288,17 +339,72 @@ object Pca {
      * [Json.MAX_DEPTH], a non-canonical number, a lone surrogate) throws here (fail closed) instead of hashing under the
      * lenient form that the reference never produces.
      */
-    fun canonBytes(v: Any?): ByteArray = Json.canonicalizeStrict(v).toByteArray(StandardCharsets.UTF_8)
+    fun canonBytes(v: Any?): ByteArray = Json.canonicalizeStrict(v).toByteArray(Charsets.UTF_8)
 
     fun hashCanonical(v: Any?): String = b64(sha(canonBytes(v)))
 
     /** base64url(sha256(strictCanonical(v))). */
-    fun hashStrict(v: Any?): String = b64(sha(Json.canonicalizeStrict(v).toByteArray(StandardCharsets.UTF_8)))
+    fun hashStrict(v: Any?): String = b64(sha(Json.canonicalizeStrict(v).toByteArray(Charsets.UTF_8)))
+
+    // ---- hash-suite agility (margin, not a fix: SHA-256 stays the default, an absent hash_suite reads as it) ----
+    const val DEFAULT_HASH_SUITE = "sha256"
+
+    /** Digest byte length per suite. */
+    val HASH_LEN: Map<String, Int> = linkedMapOf("sha256" to 32, "sha384" to 48)
+
+    /** True iff [s] is a known hash suite; anything else must fail closed at the caller. */
+    fun isHashSuite(s: Any?): Boolean = s == "sha256" || s == "sha384"
+
+    /** Raw-byte hash over the selected suite (the default is byte-identical to a bare SHA-256). */
+    @JvmOverloads
+    fun hashWithSuite(bytes: ByteArray, suite: String = DEFAULT_HASH_SUITE): ByteArray =
+        MessageDigest.getInstance(if (suite == "sha384") "SHA-384" else "SHA-256").digest(bytes)
+
+    /** base64url(H(strictCanonical(v))) under [suite]. */
+    fun hashCanonical(v: Any?, suite: String): String = b64(hashWithSuite(canonBytes(v), suite))
+
+    /** Encoded (unpadded) length of [n] bytes. */
+    fun b64uLen(n: Int): Int = (n * 4 + 2) / 3
+
+    /** True iff [s] is canonical base64url (optionally of an exact decoded byte length; negative = any). */
+    @JvmOverloads
+    fun isCanonicalB64u(s: Any?, len: Int = -1): Boolean = decodeB64uStrict(s, len) != null
+
+    /** Alias of [canonBytes]: both are strict. */
+    fun canonicalBytesStrict(v: Any?): ByteArray = canonBytes(v)
+
+    /** LENIENT canonical bytes for SERVER-ONLY digests that no verifier recomputes; never for a protocol hash. */
+    fun canonicalBytesLenient(v: Any?): ByteArray = Json.utf8(Json.canonicalize(v))
+
+    /** base64url(sha256(lenient canonical)); SERVER-ONLY digests only. */
+    fun hashCanonicalLenient(v: Any?): String = b64(sha(canonicalBytesLenient(v)))
+
+    /** Strict-profile check of one number: an error text or null. */
+    fun strictNumberError(v: Double): String? {
+        if (v.isNaN() || v.isInfinite()) return "non-finite number"
+        if (v == 0.0 && 1.0 / v < 0.0) return "negative zero"
+        if (v == Math.floor(v)) return if (Math.abs(v) <= 9007199254740991.0) null else "integer outside the safe range (|n| > 2^53-1)"
+        if (Math.abs(v) < 1e-6) return "non-integer magnitude below 1e-6 (needs an exponent form; not representable in the canonical decimal form)"
+        val s = Json.esNumber(Math.abs(v))
+        if (s.contains('e') || s.contains('E')) return "non-integer number needs an exponent form (not representable in the canonical decimal form)"
+        val digits = s.replace(".", "").trimStart('0')
+        if (digits.length > Json.MAX_DECIMAL_DIGITS) return "non-integer number has more than ${Json.MAX_DECIMAL_DIGITS} significant digits"
+        return null
+    }
+
+    /** Every plan node commits an omitted reversibility_class as this default (same on node and action). */
+    const val DEFAULT_REVERSIBILITY_CLASS = DEFAULT_REV
+
+    /** The params digest of a call with no params: what an omitted params_digest commits as. */
+    val EMPTY_PARAMS_DIGEST: String by lazy { paramsDigest(null) }
+
+    /** The Merkle leaf (before hashing) of one plan node `{id, verb, resource, params_digest?, reversibility_class?, pre?, post?}`. */
+    fun planNodeLeaf(n: Map<String, Any?>): Map<String, Any?> = planLeaf(n["id"], n, conditionsDigest(n["pre"], n["post"]))
 
     // ---- Merkle ----
-    private fun leafHash(leaf: Any?): ByteArray = sha(byteArrayOf(0x00), canonBytes(leaf))
+    internal fun leafHash(leaf: Any?): ByteArray = sha(byteArrayOf(0x00), canonBytes(leaf))
 
-    private fun nodeHash(l: ByteArray, r: ByteArray): ByteArray = sha(byteArrayOf(0x01), l, r)
+    internal fun nodeHash(l: ByteArray, r: ByteArray): ByteArray = sha(byteArrayOf(0x01), l, r)
 
     fun merkleRoot(leaves: List<Any?>): String {
         if (leaves.isEmpty()) throw IllegalArgumentException("empty leaf set")
@@ -315,7 +421,7 @@ object Pca {
     }
 
     /** Sibling sides (leaf to root) for leaf `index` of `size` leaves (RFC 6962 split). Requires 0 <= index < size. */
-    private fun pathShape(index: Long, size: Long): List<String> {
+    internal fun pathShape(index: Long, size: Long): List<String> {
         val out = ArrayList<String>()
         var idx = index
         var n = size
@@ -357,14 +463,14 @@ object Pca {
     fun paramsDigest(params: Any?): String =
         hashCanonical(params ?: LinkedHashMap<String, Any?>())
 
-    private fun conditionsDigest(pre: Any?, post: Any?): String {
+    @JvmName("conditionsDigest") internal fun conditionsDigest(pre: Any?, post: Any?): String {
         val m = LinkedHashMap<String, Any?>()
         m["pre"] = pre
         m["post"] = post
         return hashCanonical(m)
     }
 
-    private fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
+    @JvmName("planLeaf") internal fun planLeaf(nodeId: Any?, action: Map<String, Any?>, cond: String): Map<String, Any?> {
         if (nodeId == null) throw IllegalArgumentException("missing node_id")
         val pd = action["params_digest"] ?: paramsDigest(null)
         val rc = action["reversibility_class"] ?: DEFAULT_REV
@@ -392,16 +498,15 @@ object Pca {
         BigInteger("05fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826", 16),
     )
 
-    private fun leInt(b: ByteArray, off: Int, len: Int, clearTopBit: Boolean): BigInteger {
+    private fun leInt(b: ByteArray, off: Int, len: Int): BigInteger {
         val be = ByteArray(len)
         for (i in 0 until len) be[len - 1 - i] = b[off + i]
-        if (clearTopBit) be[0] = (be[0].toInt() and 0x7f).toByte()
         return BigInteger(1, be)
     }
 
     /** True iff the 32-byte point encoding has a non-canonical y (>= p) or is one of the small-order points. */
-    private fun badPointEncoding(b: ByteArray, off: Int): Boolean {
-        val y = leInt(b, off, 32, true) // sign bit ignored: both x signs share the same y
+    private fun badPointEncoding(b: ByteArray): Boolean {
+        val y = leInt(b, 0, 32).clearBit(255) // sign bit ignored: both x signs share the same y
         if (y.compareTo(P) >= 0) return true
         for (s in SMALL_ORDER_Y) if (y == s) return true
         return false
@@ -414,8 +519,8 @@ object Pca {
     fun ed25519Strict(pk: ByteArray?, msg: ByteArray, sig: ByteArray?): Boolean {
         return try {
             if (pk == null || sig == null || pk.size != 32 || sig.size != 64) return false
-            if (badPointEncoding(pk, 0) || badPointEncoding(sig, 0)) return false
-            if (leInt(sig, 32, 32, false).compareTo(L) >= 0) return false
+            if (badPointEncoding(pk) || badPointEncoding(sig)) return false
+            if (leInt(sig, 32, 32).compareTo(L) >= 0) return false
             if (!Ed25519.validatePublicKeyFull(pk, 0)) return false
             if (!Ed25519.validatePublicKeyFull(sig, 0)) return false
             Ed25519.verify(sig, 0, pk, 0, msg, 0, msg.size)
@@ -425,10 +530,7 @@ object Pca {
     }
 
     fun verifyB64u(pub: String?, msg: ByteArray, sig: String?): Boolean {
-        val pk = decodeB64uStrict(pub, 32)
-        val sg = decodeB64uStrict(sig, 64)
-        if (pk == null || sg == null) return false
-        return ed25519Strict(pk, msg, sg)
+        return ed25519Strict(decodeB64uStrict(pub, 32), msg, decodeB64uStrict(sig, 64))
     }
 
     // ---- capability chain ----
@@ -459,13 +561,13 @@ object Pca {
         return body
     }
 
-    private val HOLDER_PQ_DOMAIN = "atlas-pca/holder-pq/v1\u0000".toByteArray(StandardCharsets.UTF_8)
+    private val HOLDER_PQ_DOMAIN = "atlas-pca/holder-pq/v1\u0000".toByteArray(Charsets.UTF_8)
 
     /** holder_pq commitment: b64u(sha256(domain || utf8(pq_pk string))). Mirrors holderPqCommitment in capability.ts. */
-    fun holderPqCommitment(pqPk: String): String = b64(sha(HOLDER_PQ_DOMAIN, pqPk.toByteArray(StandardCharsets.UTF_8)))
+    fun holderPqCommitment(pqPk: String): String = b64(sha(HOLDER_PQ_DOMAIN, Json.utf8(pqPk)))
 
     /** F-2: a PQ-key suite (ml-dsa-65 / hybrid) is accepted only under the pq_pk the signer's holder committed to. Null when fine. */
-    private fun pqBindingError(alg: Any?, algPresent: Boolean, pqPk: Any?, committed: Any?, label: String): String? {
+    internal fun pqBindingError(alg: Any?, algPresent: Boolean, pqPk: Any?, committed: Any?, label: String): String? {
         val suite = Pq.resolveSigAlg(alg, algPresent)
         if (suite == null || !suite.needsPqPk) return null
         if (committed !is String)
@@ -476,10 +578,10 @@ object Pca {
     }
 
     /** allowedSuites policy (absent alg == ed25519); a null list means no policy, an empty list refuses everything. */
-    private fun suitePolicyError(alg: Any?, algPresent: Boolean, label: String, allowed: List<String>?): String? {
+    internal fun suitePolicyError(alg: Any?, algPresent: Boolean, label: String, allowed: List<String>?): String? {
         if (allowed == null) return null
         val a: String? = if (!algPresent) "ed25519" else alg as? String
-        return if (a != null && allowed.contains(a)) null else "$label: signature suite is not allowed by this verifier's suite policy"
+        return if (a != null && allowed.contains(a)) null else "$label: signature suite '${if (algPresent) IntentRevocation.jsText(IntentJs.normalize(alg), true) else "ed25519"}' is not allowed by this verifier's suite policy"
     }
 
     /** Returns "" when OK, else an error label. Suite-agile: an unknown hop alg fails closed before any hashing. */
@@ -501,6 +603,8 @@ object Pca {
         if (!ok) return "$label: bad signature (not signed by expected key)"
         return ""
     }
+
+    const val PQ_PIN_CLASSICAL_REASON = "the grant issuer is pinned to a post-quantum key; a classical grant is refused"
 
     const val ROOT_PQ_PIN_REASON_PREFIX = "hop 0: root suite '"
 
@@ -551,6 +655,97 @@ object Pca {
         } catch (ex: RuntimeException) {
             "malformed capability chain: ${ex.javaClass.simpleName}"
         }
+
+    /** Which full-verifier check a [pcactnCheapClaims] refusal corresponds to (`audience` or `validity`) and why. */
+    class CheapClaimFailure internal constructor(val check: String, val reason: String)
+
+    /**
+     * The PCActn's `aud`, `iat` and `exp`, checked BEFORE any signature verification or metering. These fields are unauthenticated here, so
+     * a pass proves nothing; but a FAIL is final: the full verifier makes exactly the same `audience` and `validity` decisions on the same
+     * fields, so a document refused here could never be admitted. O(1). Null when both checks pass. [audience] is this verifier's audience
+     * id; [now] is epoch ms.
+     */
+    fun pcactnCheapClaims(p: Map<String, Any?>, audience: String, now: Double): CheapClaimFailure? {
+        val aud = p["aud"]
+        if (aud !is String || aud.isEmpty() || aud != audience) return CheapClaimFailure("audience", "aud does not match this resource server / instance")
+        if (!Json.isSafeInt(p["iat"]) || !Json.isSafeInt(p["exp"])) return CheapClaimFailure("validity", "iat and exp must be safe-integer epoch ms")
+        if (now.isNaN() || now != Math.rint(now) || Math.abs(now) > 9007199254740991.0) return CheapClaimFailure("validity", "the verifier clock is not a safe integer epoch-ms")
+        val iat = Json.asLong(p["iat"])
+        val exp = Json.asLong(p["exp"])
+        val nowL = now.toLong()
+        return when {
+            !(exp > iat) -> CheapClaimFailure("validity", "exp must be greater than iat")
+            exp - iat > MAX_LIFETIME_MS -> CheapClaimFailure("validity", "lifetime exceeds $MAX_LIFETIME_MS ms")
+            iat > nowL + MAX_SKEW_MS -> CheapClaimFailure("validity", "iat is in the future (clock skew)")
+            nowL > exp -> CheapClaimFailure("validity", "the PCActn has expired")
+            else -> null
+        }
+    }
+
+    /** The outcome of [verifyChainCheap]: `ok` with the number of hops that still need post-quantum verification, else why not. */
+    class CheapChain internal constructor(val ok: Boolean, val pqHops: Int = 0, val reason: String? = null)
+
+    /**
+     * A necessary-condition pre-authentication chain check: shape, caps, depth, suite allowlist, body digest, parent links, issuer chaining
+     * and the Ed25519 half of each hop, in at most [MAX_CHAIN_HOPS] Ed25519 verifications whatever suites the chain names. A pure
+     * post-quantum hop passes on structure alone and is only decided by the full [verifyChain]. `ok` is NEVER an authentication: the
+     * caller must still run the full verifier (after matching the root to a stored grant) before treating the chain as authentic.
+     */
+    @JvmOverloads
+    fun verifyChainCheap(chain: List<Any?>?, expectedRootIssuer: String? = null, allowedSuites: List<String>? = null): CheapChain = try {
+        cheapChain(chain, expectedRootIssuer, allowedSuites)
+    } catch (ex: RuntimeException) {
+        CheapChain(false, 0, "malformed capability chain: ${ex.message ?: "unverifiable"}")
+    }
+
+    private fun cheapChain(chain: List<Any?>?, expectedRootIssuer: String?, allowedSuites: List<String>?): CheapChain {
+        fun no(r: String) = CheapChain(false, 0, r)
+        val arr: List<Any?> = chain ?: emptyList()
+        if (arr.isEmpty()) return no("empty chain")
+        if (arr.size > MAX_CHAIN_HOPS) return no("chain too long (max $MAX_CHAIN_HOPS hops)")
+        if (caveatLimitExceeded(arr)) return no(CAVEAT_LIMIT_REASON)
+        var pqHops = 0
+        for (i in arr.indices) {
+            val label = "hop $i"
+            val raw = arr[i]
+            if (!wellTyped(raw)) return no("$label: malformed capability")
+            val c = asMap(raw)
+            val suite = Pq.resolveSigAlg(c["alg"], c.containsKey("alg")) ?: return no("$label: ${Pq.refusal(c["alg"])}")
+            suitePolicyError(c["alg"], c.containsKey("alg"), label, allowedSuites)?.let { return no(it) }
+            if (i == 0) {
+                if (c.containsKey("parent")) return no("hop 0: root must not have a parent")
+                if (expectedRootIssuer != null && c["issuer"] != expectedRootIssuer) return no("hop 0: root issuer is not the expected principal")
+            } else {
+                val parent = asMap(arr[i - 1])
+                if (c["parent"] != capHash(parent)) return no("$label: broken parent link")
+                if (c["issuer"] != parent["holder"]) return no("$label: issuer is not the parent's bound holder")
+            }
+            val digest = try {
+                hashCanonical(signableHopBody(c) ?: return no("$label: ${Pq.refusal(c["alg"])}"))
+            } catch (ex: RuntimeException) {
+                return no("$label: malformed body")
+            }
+            if (digest != c["body_digest"] || c["id"] != c["body_digest"]) return no("$label: body digest mismatch")
+            if (suite.hasEd25519) {
+                val signer = if (i == 0) asStr(c["issuer"]) else asStr(asMap(arr[i - 1])["holder"])
+                val raw32 = decodeB64uStrict(digest, 32) ?: return no("$label: bad signature (not signed by expected key)")
+                if (!verifyB64u(signer, concat(CAP_DOMAIN, raw32), c["sig"] as? String)) return no("$label: bad signature (not signed by expected key)")
+            }
+            if (suite.needsPqPk) pqHops++
+        }
+        return CheapChain(true, pqHops, null)
+    }
+
+    /**
+     * The post-quantum verification key for a signature by [holder] (a chain leaf or threshold share) under suite [alg], minted by the
+     * single choke point from the holder's `holder_pq` commitment. Null for ed25519, and also null (so the signature check fails
+     * closed) when the artifact's `pq_pk` is not the committed key.
+     */
+    fun holderPqKey(alg: Any?, holder: String, artifactPqPk: Any?, holderPq: String?): String? {
+        val suite = Pq.resolveSigAlg(alg, alg != null) ?: return null
+        if (!suite.needsPqPk) return null
+        return PinnedPq.resolve(holder, artifactPqPk, holderPq = holderPq)?.key
+    }
 
     /**
      * Mirrors `wellTyped` in capability.ts: id/issuer/holder/body_digest/sig are strings; alg/pq_pk/pq_sig/holder_pq/parent are
@@ -613,6 +808,23 @@ object Pca {
                 if (!same) return "$label: caveat $j altered or reordered"
             }
         }
+        // the leaf holds the full append-only list
+        return allocationsMonotone(asMap(chain[chain.size - 1])["caveats"])
+    }
+
+    /** capability.ts allocationsMonotone: every `budget_alloc.limit` finite, >= 0 and never above the previous one. The failure reason, or "". */
+    internal fun allocationsMonotone(list: Any?): String {
+        if (list !is List<*>) return "malformed caveats"
+        val caveats: List<Any?> = list
+        var prev = Double.POSITIVE_INFINITY
+        for ((i, cv) in caveats.withIndex()) {
+            val c = asMap(cv)
+            if (c["type"] != "budget_alloc") continue
+            val lim = IntentJs.num(c["limit"]) ?: Double.NaN
+            if (lim.isNaN() || lim.isInfinite() || lim < 0) return "budget_alloc caveat $i: limit must be a finite number >= 0"
+            if (lim > prev) return "budget_alloc caveat $i: allocation ${AttestUtil.jsNumString(lim)} widens the parent's carried allocation ${AttestUtil.jsNumString(prev)} (monotone: a child can only allocate <= its parent)"
+            prev = lim
+        }
         return ""
     }
 
@@ -628,12 +840,40 @@ object Pca {
         "intent",
         // Intent Layer v2 (additive, SIGNED): the session member (rule 13; see IntentSession.validateWire / IntentV2).
         "intent_session",
+        // Consistency token (additive, SIGNED): the `fresh_at` member (see FreshAt.validateWire / FreshAt.decide).
+        "fresh_at",
         // B4 crypto-agility (additive): absent `alg` == "ed25519" and validates exactly as today.
         "alg", "pq_pk", "pq_sig",
     )
 
+    /** The closed set of required top-level PCActn v2 members. */
+    val REQUIRED_FIELDS: List<String> get() = REQUIRED
+
+    /** The optional top-level PCActn v2 members (most signed; `threshold` and `pq_sig` are the unsigned containers). */
+    val OPTIONAL_FIELDS: List<String> get() = OPTIONAL
+
+    /** The `type` of a carried budget-allocation caveat. */
+    const val BUDGET_ALLOC_CAVEAT = "budget_alloc"
+
+    /** A signed carried-allocation caveat `{type: "budget_alloc", limit}` for a delegation hop (a finite `limit` >= 0 verifies). */
+    fun budgetAllocCaveat(limit: Double): MutableMap<String, Any?> =
+        linkedMapOf("type" to BUDGET_ALLOC_CAVEAT, "limit" to StoreJs.num(limit))
+
+    /** A well-formed `budget_alloc` caveat: a finite `limit` >= 0. */
+    fun isBudgetAllocCaveat(cv: Any?): Boolean {
+        if (cv !is Map<*, *> || cv["type"] != "budget_alloc") return false
+        val lim = IntentJs.num(cv["limit"]) ?: return false
+        return !lim.isNaN() && !lim.isInfinite() && lim >= 0
+    }
+
+    /** Milliseconds per freshness epoch when a gate names none. */
+    const val DEFAULT_FRESHNESS_EPOCH_MS = 60_000L
+
+    /** How long a replay store must remember a consumed PCActn key: the longest lifetime plus skew on both sides. */
+    const val REPLAY_MIN_RETENTION_MS = MAX_LIFETIME_MS + 2 * MAX_SKEW_MS
+
     /** Length unit for aud / nonce limits is UTF-8 BYTES. */
-    private fun utf8Len(s: String): Int = s.toByteArray(StandardCharsets.UTF_8).size
+    private fun utf8Len(s: String): Int = Json.utf8(s).size
 
     /**
      * Closed capability-hop key set (parent optional). The B4 crypto-agility fields (alg/pq_pk/pq_sig) are
@@ -674,7 +914,7 @@ object Pca {
             if (!Json.isSafeInt(p["iat"])) return "'iat' must be a safe integer"
             if (!Json.isSafeInt(p["exp"])) return "'exp' must be a safe integer"
             val aud = p["aud"]
-            if (!isStr(aud) || (aud as String).isEmpty() || utf8Len(aud) > MAX_AUD_LEN) return "'aud' must be a non-empty string"
+            if (!isStr(aud) || (aud as String).isEmpty() || utf8Len(aud) > MAX_AUD_LEN) return "'aud' must be a non-empty string (<= 256 UTF-8 bytes)"
             if (p.containsKey("nonce")) {
                 val n = p["nonce"]
                 if (!isStr(n) || (n as String).isEmpty() || utf8Len(n) > MAX_NONCE_LEN) return "'nonce' must be a non-empty string"
@@ -770,6 +1010,7 @@ object Pca {
             if (p.containsKey("progress_step") && !isObj(p["progress_step"])) return "'progress_step' must be an object"
             if (p.containsKey("intent")) validateIntentWire(p["intent"])?.let { return it }
             if (p.containsKey("intent_session")) IntentSession.validateWire(p["intent_session"])?.let { return it }
+            if (p.containsKey("fresh_at")) FreshAt.validateWire(p["fresh_at"])?.let { return it }
             if (p.containsKey("prohibition_evidence") && !isObj(p["prohibition_evidence"]) && p["prohibition_evidence"] !is List<*>)
                 return "'prohibition_evidence' must be an object or array"
             if (p.containsKey("threshold")) {
@@ -797,13 +1038,15 @@ object Pca {
         val body = LinkedHashMap<String, Any?>()
         // `sig`, `threshold` and the B4 `pq_sig` are unsigned (stripped); `alg`/`pq_pk` ARE signed.
         for ((k, v) in p) if (k != "sig" && k != "threshold" && k != "pq_sig") body[k] = v
-        return concat(SIG_DOMAIN, sha(Json.canonicalizeStrict(body).toByteArray(StandardCharsets.UTF_8)))
+        return concat(SIG_DOMAIN, sha(Json.canonicalizeStrict(body).toByteArray(Charsets.UTF_8)))
     }
 
     /** Verify raw PCActn JSON text: strict-profile parse first (any failure, or a non-object, is a wire failure). */
     fun verifyPcactnJson(
         text: String, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
-        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null, freshAt: FreshAt.Policy? = null,
+        authorizedPlanRoots: List<String>? = null, insecureSkipPlanRootCheck: Boolean = false, pqPins: Map<String, Any?>? = null,
+        attestationHook: PcaCore.Hook? = null, zkHook: PcaCore.Hook? = null,
     ): Verdict {
         if (artifactTooLarge(text)) { // FIRST: before any parsing
             val big = Verdict()
@@ -818,31 +1061,40 @@ object Pca {
             v.fail("wire", "strict JSON: ${e.message}")
             return v
         }
-        return verifyPcactn(parsed, grant, now, audience, allowedSuites, intentPolicy, intentV2)
+        return verifyPcactn(parsed, grant, now, audience, allowedSuites, intentPolicy, intentV2, freshAt, authorizedPlanRoots, insecureSkipPlanRootCheck, pqPins, attestationHook, zkHook)
     }
 
     /**
      * Verify a parsed PCActn (Json.parse / parseLenient tree). Check order: wire (terminal), version, audience,
-     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter, then `intent` iff the PCActn carries
+     * validity, chain, grant_ref_bound, plan_inclusion, leaf_signature, counter_format, then `intent` iff the PCActn carries
      * `intent` or [intentPolicy] is active (Intent Layer M2; absent both, the verdict is the pre-M2 one), then the Intent
      * Layer v2 checks `schema`, `intent_session`, `layers`, `accumulators`, `facts`, `provenance`, `classes` exactly when
-     * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before).
-     * allow = every check true.
+     * [IntentV2] reports them under [intentV2] (null = none: a PCActn without `intent_session` verifies exactly as before), then
+     * `fresh_at` (the consistency token; see [FreshAt.decide]) iff the PCActn carries the member, [freshAt] reads a side-carried token or
+     * requires one. allow = every check true.
+     *
+     * [attestationHook] and [zkHook] are the reference's `hooks.attestation` and `hooks.zk`: an enforced attestation result passes or fails the
+     * `attestation` check (not enforced leaves it unreported); [zkHook] runs only for a PCActn that CARRIES `zk_compliance`, whose proof no hook
+     * enforced (none given, or one reporting not enforced) is refused: an unverified proof is never accepted. A hook that throws is a `malformed` failure.
      */
     fun verifyPcactn(
         pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>? = null,
-        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null,
+        intentPolicy: IntentPolicy? = null, intentV2: IntentV2.Context? = null, freshAt: FreshAt.Policy? = null,
+        authorizedPlanRoots: List<String>? = null, insecureSkipPlanRootCheck: Boolean = false, pqPins: Map<String, Any?>? = null,
+        attestationHook: PcaCore.Hook? = null, zkHook: PcaCore.Hook? = null,
     ): Verdict =
         // TOTAL (R6-05): any residual fault on hostile input is a terminal wire refusal, never an exception.
         try {
-            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites, intentPolicy, intentV2)
+            verifyPcactnUnchecked(pcactn, grant, now, audience, allowedSuites, intentPolicy, intentV2, freshAt, authorizedPlanRoots, insecureSkipPlanRootCheck, pqPins, attestationHook, zkHook)
         } catch (ex: RuntimeException) {
             Verdict().also { it.fail("wire", "malformed input (${ex.javaClass.simpleName})") }
         }
 
     private fun verifyPcactnUnchecked(
         pcactn: Any?, grant: Map<String, Any?>, now: Long, audience: Audience, allowedSuites: List<String>?,
-        intentPolicy: IntentPolicy?, intentV2: IntentV2.Context?,
+        intentPolicy: IntentPolicy?, intentV2: IntentV2.Context?, freshAt: FreshAt.Policy?,
+        authorizedPlanRoots: List<String>?, insecureSkipPlanRootCheck: Boolean, pqPins: Map<String, Any?>?,
+        attestationHook: PcaCore.Hook?, zkHook: PcaCore.Hook?,
     ): Verdict {
         val v = Verdict()
         val wire = validateWireV2(pcactn)
@@ -854,6 +1106,7 @@ object Pca {
         v.checks["wire"] = true
         val intentPresent = p.containsKey("intent")
         val intentReported = intentPresent || (intentPolicy != null && intentPolicy.isActive)
+        var faulted = false
         try {
             // version
             if (Json.asLong(p["ver"]) == WIRE_VERSION) v.checks["version"] = true
@@ -883,9 +1136,14 @@ object Pca {
                 chain.size > MAX_CHAIN_HOPS -> "chain too long (max $MAX_CHAIN_HOPS hops)"
                 caveatLimitExceeded(chain) -> CAVEAT_LIMIT_REASON
                 capHash(asMap(chain[0])) != capHash(grant) -> "chain root is not the grant"
-                else -> verifyChain(chain, asStr(grant["issuer"]), grant["issuer"] is String, allowedSuites, null, grant) // chain[0] == grant was checked above
+                else -> verifyChain(chain, asStr(grant["issuer"]), grant["issuer"] is String, allowedSuites, pqPins, grant) // chain[0] == grant was checked above
             }
             if (why.isEmpty()) v.checks["chain"] = true else v.fail("chain", why)
+            // a PIN for the root issuer says its grants are post-quantum protected: a classical root naming it is refused (checked here, not in the chain kernel)
+            val rootCap = chain.firstOrNull() as? Map<*, *>
+            val rootIssuer = rootCap?.get("issuer")
+            if (pqPins != null && rootCap != null && rootIssuer is String && pqPins.containsKey(rootIssuer) && (!rootCap.containsKey("alg") || rootCap["alg"] == "ed25519"))
+                v.fail("pq_pin", PQ_PIN_CLASSICAL_REASON)
 
             // grant_ref_bound (normative): the signed grant_ref MUST be a non-empty string byte-equal to the id of the
             // ROOT capability of the presented chain (cap_chain[0].id). Independent of the chain verdict; fail-closed
@@ -907,6 +1165,14 @@ object Pca {
             if (incl) v.checks["plan_inclusion"] = true
             else v.fail("plan_inclusion", "action is not a node of the committed plan")
 
+            // plan_root_authorized: the root must be one the principal authorized. A list given (even empty) is enforced and wins over the
+            // opt-out; none and no explicit insecureSkipPlanRootCheck fails; the opt-out reports not-enforced.
+            if (authorizedPlanRoots == null) {
+                if (insecureSkipPlanRootCheck) v.notEnforced.add("plan_root_authorized")
+                else v.fail("plan_root_authorized", "no authorized plan is configured for this verifier (set authorizedPlanRoots, or the explicit insecureSkipPlanRootCheck)")
+            } else if (plan["root"] is String && authorizedPlanRoots.contains(plan["root"] as String)) v.checks["plan_root_authorized"] = true
+            else v.fail("plan_root_authorized", "the plan root has not been authorized by the principal")
+
             // leaf signature — routed through the B4 suite seam (ed25519 / ml-dsa-65 / hybrid). For the default
             // (no `alg`) this is byte-identical to the classical strict-Ed25519 path under the leaf holder.
             var sigOk = false
@@ -925,8 +1191,8 @@ object Pca {
             else v.fail("leaf_signature", "signature does not verify under the leaf holder key")
 
             // counter
-            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter"] = true
-            else v.fail("counter", "missing or not a non-negative safe integer")
+            if (Json.isSafeInt(p["counter"]) && Json.asLong(p["counter"]) >= 0) v.checks["counter_format"] = true
+            else v.fail("counter_format", "missing or not a non-negative safe integer")
 
             // Intent Layer M2: `intent` (reported iff the PCActn carries intent or the policy is active)
             val session = if (p.containsKey("intent_session")) asMap(p["intent_session"])["session"] else null
@@ -936,18 +1202,81 @@ object Pca {
                 if (intentWhy.isEmpty()) v.checks["intent"] = true else v.fail("intent", intentWhy)
             }
         } catch (e: RuntimeException) {
-            if (v.reason.isEmpty()) v.reason = "malformed PCActn: $e"
+            faulted = true
+            if (v.reason.isEmpty()) { v.reason = "malformed PCActn: $e"; v.reasons.add(v.reason) }
         }
         // any check not reached (internal error) is a failure; keep normative key order
         val ordered = LinkedHashMap<String, Boolean>()
-        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"))
+        for (k in arrayOf("wire", "version", "audience", "validity", "chain", "pq_pin", "grant_ref_bound", "plan_inclusion", "plan_root_authorized", "leaf_signature", "counter_format")) {
+            if (k == "pq_pin" && k !in v.checks) continue // reported only when it fails
+            if (k == "plan_root_authorized" && k in v.notEnforced) continue // the explicit opt-out reports not-enforced and is no check row
             ordered[k] = v.checks[k] == true
-        if (intentReported) ordered["intent"] = v.checks["intent"] == true
-        // Intent Layer v2 (rules 13-18): reported in pipeline order exactly when IntentV2 reports them (total: never throws)
-        for (c in IntentV2.decide(p, grant, intentV2, now).checks) {
-            ordered[c.name] = c.ok
-            if (!c.ok && v.reason.isEmpty()) v.reason = "${c.name}: ${c.reason}"
         }
+        if (intentReported) ordered["intent"] = v.checks["intent"] == true
+        // a fault after every core check passed still denies (TS CoreMalformed: checks.malformed = fail)
+        if (faulted) ordered["malformed"] = false
+        // Intent Layer v2 (rules 13-18): reported in pipeline order exactly when IntentV2 reports them (total: never throws)
+        val v2 = IntentV2.decide(p, grant, intentV2, now)
+        for (c in v2.checks) {
+            ordered[c.name] = c.ok
+            if (!c.ok) {
+                val r = "${c.name}: ${c.reason}"
+                v.reasons.add(r) // never a duplicate: v2 check names are distinct and none is a core check name
+                if (v.reason.isEmpty()) v.reason = r
+            }
+        }
+        // Consistency token: `fresh_at`, right after the intent checks; reported only when the PCActn carries the member, a side-carried token
+        // is read, or the policy requires one (otherwise no entry: byte-identical to before). A stale verifier is an `escalate:` failure.
+        val fa = FreshAt.decide(p["fresh_at"], p.containsKey("fresh_at"), freshAt, now)
+        if (fa.status != FreshAt.Status.NONE) {
+            ordered["fresh_at"] = fa.status == FreshAt.Status.PASS
+            if (fa.status == FreshAt.Status.FAIL) {
+                val r = "fresh_at: ${fa.reason}"
+                v.reasons.add(r)
+                if (v.reason.isEmpty()) v.reason = r
+            }
+        }
+        // the verifier hooks (hooks.attestation, hooks.zk): an enforced verdict decides its check, a hook that throws is a malformed PCActn
+        var zkDecided = false
+        try {
+            val hookCtx = PcaCore.Ctx(p, grant, now)
+            if (attestationHook != null) {
+                val r = attestationHook.run(hookCtx)
+                if (r.enforced) {
+                    ordered["attestation"] = r.ok
+                    if (!r.ok) {
+                        val why = "attestation: ${r.reason ?: "rejected"}"
+                        v.reasons.add(why)
+                        if (v.reason.isEmpty()) v.reason = why
+                    }
+                }
+            }
+            if (p.containsKey("zk_compliance") && zkHook != null) {
+                val r = zkHook.run(hookCtx)
+                if (r.enforced) {
+                    zkDecided = true
+                    ordered["zk_compliance"] = r.ok
+                    if (!r.ok) {
+                        val why = "zk_compliance: ${r.reason ?: "rejected"}"
+                        v.reasons.add(why)
+                        if (v.reason.isEmpty()) v.reason = why
+                    }
+                }
+            }
+        } catch (e: RuntimeException) {
+            ordered["malformed"] = false
+            val why = "malformed PCActn: ${e.message}"
+            v.reasons.add(why)
+            if (v.reason.isEmpty()) v.reason = why
+        }
+        // a carried zk proof asserts a compliance guarantee: with no zk verifier that enforced it, fail closed at the core (pcactn.ts:835-841)
+        if (p.containsKey("zk_compliance") && !zkDecided && ordered["malformed"] != false) {
+            ordered["zk_compliance"] = false
+            val r = "zk_compliance: PCActn carries a zk_compliance proof but no zk verifier enforced it (fail closed): configure hooks.zk or do not present a proof"
+            v.reasons.add(r)
+            if (v.reason.isEmpty()) v.reason = r
+        }
+        v.legacyModelPolarity = v2.legacyModelPolarity
         v.checks.clear()
         v.checks.putAll(ordered)
         v.allow = !v.checks.containsValue(false)

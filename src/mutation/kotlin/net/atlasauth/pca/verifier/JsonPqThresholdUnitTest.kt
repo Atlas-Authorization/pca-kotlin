@@ -1,6 +1,7 @@
 package net.atlasauth.pca.verifier
 
 import net.atlasauth.pca.verifier.KUtil.l
+import net.atlasauth.pca.verifier.KUtil.ll
 import net.atlasauth.pca.verifier.KUtil.m
 import net.atlasauth.pca.verifier.KUtil.mm
 import net.atlasauth.pca.verifier.KUtil.n
@@ -61,8 +62,8 @@ class JsonPqThresholdUnitTest {
         assertEquals("{\"B\":1,\"a\":2,\"\u00e9\":3,\"\uff5e\":4,\"\ud83d\ude00\":5}", Json.canonicalize(m("\ud83d\ude00" to 5, "\uff5e" to 4, "\u00e9" to 3, "a" to 2, "B" to 1)))
         assertEquals("\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f \u007f\"", Json.canonicalize("\"\\\b\u000c\n\r\t\u0001\u001f \u007f"))
         assertEquals("\"\u00e9\ud83d\ude00\"", Json.canonicalize("\u00e9\ud83d\ude00"))
-        assertEquals("\"\ufffd\"", Json.canonicalize("\ud83d")); assertEquals("\"\ufffdx\"", Json.canonicalize("\ud83dx")); assertEquals("\"\ufffd\"", Json.canonicalize("\ude00"))
-        assertEquals("\"a\ufffd\"", Json.canonicalize("a\ud83d")); assertEquals("\"\ufffd\ud83d\ude00\"", Json.canonicalize("\ud83d\ud83d\ude00"))
+        assertEquals("\"\\ud83d\"", Json.canonicalize("\ud83d")); assertEquals("\"\\ud83dx\"", Json.canonicalize("\ud83dx")); assertEquals("\"\\ude00\"", Json.canonicalize("\ude00")) // JSON.stringify: a lone surrogate is escaped
+        assertEquals("\"a\\ud83d\"", Json.canonicalize("a\ud83d")); assertEquals("\"\\ud83d\ud83d\ude00\"", Json.canonicalize("\ud83d\ud83d\ude00"))
         assertEquals("canonicalize: lone surrogate in string", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict("\ud83d") }.message)
         assertEquals("canonicalize: lone surrogate in string", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(m("\ude00" to 1)) }.message)
         assertEquals("100000", Json.canonicalize(n("1e5"))); assertEquals("1.5", Json.canonicalize(n("1.50"))); assertEquals("0", Json.canonicalize(n("-0"))); assertEquals("0", Json.canonicalize(n("0.0")))
@@ -74,7 +75,7 @@ class JsonPqThresholdUnitTest {
         assertEquals("1", Json.fmtNumber("1")); assertEquals("1.5", Json.fmtNumber("1.5")); assertEquals("1.5", Json.fmtNumber("1.50"))
         assertEquals("[1,1.5]", Json.canonicalizeStrict(l(n("1"), n("1.5"))))
         assertEquals("canonicalize: exponent form is not allowed", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(n("1e5")) }.message)
-        assertEquals("canonicalize: integer outside the safe range", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(9007199254740992L) }.message)
+        assertEquals("canonicalize: integer outside the safe range (|n| > 2^53-1)", assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(9007199254740992L) }.message)
         assertEquals("9007199254740991", Json.canonicalizeStrict(9007199254740991L)); assertEquals("5", Json.canonicalizeStrict(5)); assertEquals("9007199254740992", Json.canonicalize(9007199254740992L))
         assertTrue(assertThrows(IllegalArgumentException::class.java) { Json.canonicalize(1.5) }.message!!.startsWith("canonicalize: unsupported type"))
         assertTrue(assertThrows(IllegalArgumentException::class.java) { Json.canonicalizeStrict(1.5) }.message!!.startsWith("canonicalize: unsupported type"))
@@ -130,10 +131,10 @@ class JsonPqThresholdUnitTest {
             assertThrows(IllegalArgumentException::class.java) { Json.parseLenient(inp) }
         }
         assertEquals("A", Json.parse("\"\\u0041\""))
-        @Suppress("UNCHECKED_CAST") (Json.parse("{ }") as MutableMap<String, Any?>)["k"] = 1
-        @Suppress("UNCHECKED_CAST") (Json.parse("[ ]") as MutableList<Any?>).add(1)
-        @Suppress("UNCHECKED_CAST") (Json.parse("{}") as MutableMap<String, Any?>)["k"] = 1
-        @Suppress("UNCHECKED_CAST") (Json.parse("[]") as MutableList<Any?>).add(1)
+        mm(Json.parse("{ }"))["k"] = 1
+        ll(Json.parse("[ ]")).add(1)
+        mm(Json.parse("{}"))["k"] = 1
+        ll(Json.parse("[]")).add(1)
     }
 
     @Test fun suites() {
@@ -254,5 +255,52 @@ class JsonPqThresholdUnitTest {
         }
         assertTrue("valid shares $seen", seen > 3)
         assertFalse(Threshold.verifyShare("agent", tm, l("x"), 1, m()))
+    }
+
+    // ---- additions (round 2): the Java suite's remaining tests
+
+    @Test fun suiteConstructor() {
+        val s = Pq.Suite("a", 5, true, null, true, false, true)
+        assertEquals("a", s.alg); assertEquals(5, s.sigBytes); assertTrue(s.hasEd25519); assertNull(s.pq); assertTrue(s.needsPqPk); assertFalse(s.needsPqSig); assertTrue(s.nested)
+        val t = Pq.Suite("b", 7, false, Pq.Prim.SLH_DSA_SHA2_256S, false, true, false)
+        assertEquals("b", t.alg); assertEquals(7, t.sigBytes); assertFalse(t.hasEd25519); assertEquals(Pq.Prim.SLH_DSA_SHA2_256S, t.pq); assertFalse(t.needsPqPk); assertTrue(t.needsPqSig); assertFalse(t.nested)
+    }
+
+    // Kotlin's verifyLeafSuite is Java's verifyLeafSuiteCallerVouched; its key-authorised seam (Java verifyLeafSuite) is verifySuite
+    @Test fun callerVouched() {
+        val p = mm(KUtil.vec("pq-leaf-ml-dsa-65-valid")["pcactn"])
+        val msg = Pca.thresholdMessage(p)
+        assertTrue(Pq.verifyLeafSuite("ml-dsa-65", true, "h", p["pq_pk"], msg, p["sig"], null))
+        assertFalse(Pq.verifyLeafSuite("ml-dsa-65", true, "h", 5, msg, p["sig"], null))
+        assertFalse(Pq.verifyLeafSuite("ml-dsa-65", true, "h", null, msg, p["sig"], null))
+        assertFalse(Pq.verifyLeafSuite("ml-dsa-65", true, "h", "", msg, p["sig"], null))
+        assertFalse(Pq.verifySuite("ml-dsa-65", true, "h", null, msg, p["sig"], null))
+        val hp = mm(KUtil.vec("pq-leaf-hybrid-ed25519-ml-dsa-65-valid")["pcactn"])
+        val chain = KUtil.ll(hp["cap_chain"])
+        val holder = mm(chain[chain.size - 1])["holder"] as String
+        assertFalse(Pq.verifySuite("hybrid-ed25519-ml-dsa-65", true, holder, null, Pca.thresholdMessage(hp), hp["sig"], hp["pq_sig"]))
+        assertTrue(Pq.verifyArtifactSignature("hybrid-ed25519-ml-dsa-65", holder, hp["pq_pk"], Pca.thresholdMessage(hp), hp["sig"], hp["pq_sig"]))
+        assertFalse(Pq.verifyArtifactSignature("hybrid-ed25519-ml-dsa-65", holder, 5, Pca.thresholdMessage(hp), hp["sig"], hp["pq_sig"]))
+    }
+
+    @Test fun parserFullwidthHex() {
+        // Character.digit accepts non-ASCII digits; the \\u escape must not
+        for (digits in listOf("\uff10\uff10\uff10\uff11", "\u0660\u0660\u0660\u0661", "00\uff10\uff11", "\uff1000")) {
+            val input = "\"" + "\\" + "u" + digits + "\""
+            assertEquals("bad \\u escape at 3", assertThrows(IllegalArgumentException::class.java) { Json.parse(input) }.message)
+            assertThrows(IllegalArgumentException::class.java) { Json.parseLenient(input) }
+        }
+        assertEquals("A", Json.parse("\"\\u0041\""))
+        mm(Json.parse("{ }"))["k"] = 1
+        ll(Json.parse("[ ]")).add(1)
+        mm(Json.parse("{}"))["k"] = 1
+        ll(Json.parse("[]")).add(1)
+        assertTrue(Json.parse("{}") is LinkedHashMap<*, *>)
+        assertTrue(Json.parse("[]") is ArrayList<*>)
+    }
+
+    @Test fun hugeExponent() {
+        assertEquals("canonicalize: non-finite number", assertThrows(IllegalArgumentException::class.java) { Json.fmtNumber("1e99999999999") }.message)
+        assertEquals("canonicalize: non-finite number", assertThrows(IllegalArgumentException::class.java) { Json.canonicalize(n("1e99999999999")) }.message)
     }
 }

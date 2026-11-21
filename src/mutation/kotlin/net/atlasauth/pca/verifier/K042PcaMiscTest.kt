@@ -45,7 +45,7 @@ class K042PcaMiscTest {
     @Test fun suiteRegistry() {
         val reg = Pq.REGISTERED_SUITES
         assertEquals(14, reg.size)
-        assertEquals("ed25519", reg[0]); assertEquals("hybrid-ed25519-less-cat1", reg[13]); assertTrue(reg.contains("fn-dsa-512"))
+        assertEquals("ed25519", reg[0]); assertEquals("fn-dsa-1024", reg[13]); assertTrue(reg.contains("fn-dsa-512"))
         val sup = Pq.supportedSuites()
         assertTrue(sup.isNotEmpty()); assertEquals("ed25519", sup[0])
         assertEquals(reg.filter { it in sup }, sup)
