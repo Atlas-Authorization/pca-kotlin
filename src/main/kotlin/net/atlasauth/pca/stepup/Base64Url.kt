@@ -6,7 +6,7 @@ internal object Base64Url {
     private val REVERSE = IntArray(128) { -1 }.also { r -> ALPHABET.forEachIndexed { i, c -> r[c.code] = i } }
 
     fun encode(data: ByteArray): String {
-        val sb = StringBuilder((data.size * 4 + 2) / 3)
+        val sb = StringBuilder()
         var i = 0
         while (i < data.size) {
             val b0 = data[i].toInt() and 0xff
@@ -25,7 +25,7 @@ internal object Base64Url {
     fun decode(input: String): ByteArray? {
         val s = input.trimEnd('=')
         if (s.length % 4 == 1) return null
-        val out = ArrayList<Byte>(s.length * 3 / 4)
+        val out = ArrayList<Byte>()
         var buf = 0
         var bits = 0
         for (ch in s) {

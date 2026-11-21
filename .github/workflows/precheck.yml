@@ -1,0 +1,64 @@
+name: Precheck
+
+# Compile-only gate, gradle compile of the Android library (main and unit-test sources) and mvn test-compile of the JVM modules.
+# Runs only on pre/** pushes (and by hand): it builds and typechecks everything, tests included, and runs no test.
+# Push pre/<version> first and the full ci/** run only when this is green.
+on:
+  push:
+    branches: ['pre/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  precheck:
+    name: compile main and test sources (no test runs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full adversarial corpus + parity vectors from the flagship
+        run: .github/scripts/fetch-flagship-corpus.sh --layout
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android library, release main sources and debug unit-test sources
+        run: gradle --no-daemon assembleRelease compileDebugUnitTestKotlin
+      - name: Source layout (full shared corpus from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - name: Java core library from the pca-java mirror
+        shell: bash
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY_OWNER:-Atlas-Authorization}/pca-java.git"
+          REF="${GITHUB_REF_NAME:-main}"
+          git ls-remote --exit-code "$URL" "refs/heads/$REF" "refs/tags/$REF" >/dev/null 2>&1 || REF=main
+          git clone -q --depth 1 --branch "$REF" "$URL" "$RUNNER_TEMP/pca-java"
+          mvn -B -ntp -q -f "$RUNNER_TEMP/pca-java/pom.xml" install -DskipTests
+      - name: JVM library (main and test sources)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: mvn -B -ntp -q test-compile
+      # each module has an adapter (the vendored Java adapter, installed first) and/or its own pom
+      - name: Every JVM module (adapters installed, then test-compile)
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          set -euo pipefail
+          for a in */adapter/pom.xml; do
+            [ -f "$a" ] || continue
+            echo "::group::$a"; mvn -B -ntp -q -f "$a" install -DskipTests; echo "::endgroup::"
+          done
+          for p in */pom.xml; do
+            [ -f "$p" ] || continue
+            echo "::group::$p"; mvn -B -ntp -q -f "$p" test-compile; echo "::endgroup::"
+          done

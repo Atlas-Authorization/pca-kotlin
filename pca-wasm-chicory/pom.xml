@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven build of the Chicory WebAssembly host, beside the Gradle module (build.gradle.kts). A separate pom so the core library and the
+     mutation build gain no engine dependency. Same sources as the Gradle module: this module's own, plus the core verifier, jose and
+     sandbox packages. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId><artifactId>pca-wasm-chicory-kotlin</artifactId><version>0</version>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kotlin.version>2.0.21</kotlin.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>${kotlin.version}</version></dependency>
+    <dependency><groupId>org.bouncycastle</groupId><artifactId>bcprov-jdk18on</artifactId><version>1.80</version></dependency>
+    <dependency><groupId>com.squareup.okhttp3</groupId><artifactId>okhttp</artifactId><version>4.12.0</version></dependency>
+    <dependency><groupId>com.ibm.icu</groupId><artifactId>icu4j</artifactId><version>78.3</version></dependency>
+    <!-- pinned: the interpreter machine and its ExecutionListener hook are what the fuel meter relies on -->
+    <dependency><groupId>com.dylibso.chicory</groupId><artifactId>runtime</artifactId><version>1.7.5</version></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>
+        <configuration><jvmTarget>17</jvmTarget></configuration>
+        <executions>
+          <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals>
+            <configuration><sourceDirs>
+              <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
+              <sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/analyzer</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/compliance</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/events</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/evidence</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/explain</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/gnap</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/intent</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/jose</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/payments</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/research</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/sandbox</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/scitt</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/verifier</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/wallet</sourceDir><sourceDir>${project.basedir}/../src/main/kotlin/net/atlasauth/pca/webauthn</sourceDir>
+              </sourceDirs></configuration></execution>
+          <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals>
+            <configuration><sourceDirs><sourceDir>${project.basedir}/src/test/kotlin</sourceDir></sourceDirs></configuration></execution>
+        </executions>
+      </plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version>
+        <configuration><argLine>-Xss16m</argLine></configuration></plugin>
+    </plugins>
+  </build>
+</project>

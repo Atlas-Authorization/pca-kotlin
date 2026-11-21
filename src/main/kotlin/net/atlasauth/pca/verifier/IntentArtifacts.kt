@@ -5,6 +5,7 @@ package net.atlasauth.pca.verifier
  * member sets, signatures under a VERIFIER-pinned key over `utf8(domain) || strictCanonical(artifact without sig and
  * pq_sig)`, content-addressed references, and own-member parameter paths.
  */
+@Suppress("UNCHECKED_CAST")
 internal object IntentArtifacts {
     val INTENT_NAME_RE = Regex("[a-z][a-z0-9_]{0,63}")
     val DATA_CLASS_RE = Regex("[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*")
@@ -15,6 +16,30 @@ internal object IntentArtifacts {
     fun isName(v: Any?): Boolean = v is String && INTENT_NAME_RE.matches(v)
     fun isBoundedString(v: Any?, max: Int): Boolean = v is String && v.isNotEmpty() && IntentJs.u8len(v) <= max
     fun isDigest(v: Any?): Boolean = IntentJs.b32(v)
+
+    /** [isBoundedString] with a limit that is any number (a NaN or negative limit refuses every string). */
+    fun isBoundedString(v: Any?, max: Double): Boolean = v is String && v.isNotEmpty() && IntentJs.u8len(v) <= max
+
+    /** A JSON object that is not an array (native JSON values have no prototypes). */
+    fun isPlainObject(v: Any?): Boolean = v is Map<*, *>
+
+    /** A safe integer that is not negative zero. */
+    fun isSafeInt(v: Any?): Boolean = IntentJs.isInt(v)
+
+    /** The UTF-8 length of a string (a lone surrogate encodes as U+FFFD, 3 bytes). */
+    fun utf8Len(s: String): Int = IntentJs.u8len(s)
+
+    /** A usable clock value: a safe integer (anything else makes every freshness bound fail, i.e. stale). */
+    fun isClock(v: Any?): Boolean = isSafeInt(v)
+
+    /** Own-member lookup (null when absent or `o` is not an object): never an inherited member. */
+    fun ownGet(o: Any?, k: String): Any? = if (o is Map<*, *> && o.containsKey(k)) o[k] else null
+
+    /** A record in which `constructor`, `toString` and `__proto__` are ordinary keys. */
+    fun nullRecord(): MutableMap<String, Any?> = LinkedHashMap()
+
+    /** A pin's `pq_pk` value: absent, or a non-empty string (JSON null is malformed). */
+    fun pinPqValueOk(v: Any?, present: Boolean): Boolean = !present || (v is String && v.isNotEmpty())
 
     /** A wire scalar: string, boolean or safe integer (not -0). */
     fun isScalar(v: Any?): Boolean = v is String || v is Boolean || IntentJs.isInt(v)
@@ -31,7 +56,7 @@ internal object IntentArtifacts {
 
     /** Null when every key is listed and every required key is present, else the reason. */
     fun closedMembers(o: Map<String, Any?>, required: List<String>, optional: List<String>, where: String): String? {
-        for (k in o.keys) if (k !in required && k !in optional) return "unknown member '$where.$k'"
+        for (k in IntentJs.jsKeys(o)) if (k !in required && k !in optional) return "unknown member '$where.$k'"
         for (k in required) if (!o.containsKey(k)) return "missing member '$where.$k'"
         return null
     }
@@ -50,6 +75,9 @@ internal object IntentArtifacts {
      * The artifact's suite capability: a non-string `alg` is malformed, an `alg` this verifier does not implement is
      * `unsupported_suite`, `pq_pk` / `pq_sig` must be strings, and an ed25519 artifact carries neither.
      */
+    fun artifactSuiteError(a: Any?): String? = if (a is Map<*, *>) artifactSuiteError(a as Map<String, Any?>) else "artifact must be an object"
+
+    @Suppress("UNCHECKED_CAST")
     fun artifactSuiteError(a: Map<String, Any?>): String? {
         val e = IntentJs.suiteError(a["alg"], a.containsKey("alg"))
         if (e != null) return e
@@ -71,7 +99,8 @@ internal object IntentArtifacts {
      * own `pq_pk` alone never authorises it); malformed input is a failed signature. Never throws.
      */
     fun verifyArtifactSig(domain: String, artifact: Map<String, Any?>, pinnedPk: Any?, pinnedPqPk: Any?): Boolean = try {
-        if (artifact["sig"] !is String || pinnedPk !is String) false
+        // a non-string sig is refused by verifyPinnedSuite itself (verifyEd / Pq.verifySuite: `sig is String`)
+        if (pinnedPk !is String) false
         else IntentJs.verifyPinnedSuite(
             artifact["alg"], artifact.containsKey("alg"), pinnedPk, artifact["pq_pk"],
             artifactMessage(domain, artifact), artifact["sig"], artifact["pq_sig"], IntentJs.pin(pinnedPk, pinnedPqPk),
@@ -108,6 +137,7 @@ internal object IntentArtifacts {
         var cur = root
         for (i in 0 until segs.size - 1) {
             val k = segs[i]
+            if (k == "__proto__" && !cur.containsKey(k)) return false // the prototype slot is not a member to create: refused, nothing changed
             if (!cur.containsKey(k)) cur[k] = LinkedHashMap<String, Any?>()
             val next = cur[k] as? MutableMap<String, Any?> ?: return false
             cur = next

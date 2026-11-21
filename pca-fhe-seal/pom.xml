@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Kotlin wrapper of the Java adapter net.atlasauth:pca-fhe-seal (BFV risk gate over Microsoft SEAL's C export API through JNA). A separate module so the
+     core library gains no native dependency. Install the Java adapter first (CI does: mvn -f adapters/pca-fhe-seal install -DskipTests in java-pca), then
+     mvn test -Dpca.sealc.lib=/path/to/libsealc.so -Dpca.fhe.corpus=/path/to/fhe-seal.json.gz -Dpca.fhe.required=true -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId><artifactId>pca-fhe-seal-kotlin</artifactId><version>0</version>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kotlin.version>2.0.21</kotlin.version>
+    <pca.sealc.lib>libsealc.so</pca.sealc.lib>
+    <pca.fhe.corpus></pca.fhe.corpus>
+    <pca.fhe.required>false</pca.fhe.required>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>${kotlin.version}</version></dependency>
+    <dependency><groupId>net.atlasauth</groupId><artifactId>pca-fhe-seal</artifactId><version>0</version></dependency>
+    <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.11.0</version><scope>test</scope></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>
+        <configuration><jvmTarget>17</jvmTarget></configuration>
+        <executions>
+          <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals></execution>
+          <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals></execution>
+        </executions>
+      </plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version>
+        <configuration><argLine>-Dpca.sealc.lib=${pca.sealc.lib} -Dpca.fhe.corpus=${pca.fhe.corpus} -Dpca.fhe.required=${pca.fhe.required}</argLine></configuration></plugin>
+    </plugins>
+  </build>
+</project>

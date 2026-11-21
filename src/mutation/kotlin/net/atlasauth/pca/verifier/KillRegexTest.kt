@@ -72,7 +72,7 @@ class KillRegexTest {
     @Test fun budgetSequences() {
         @Suppress("UNCHECKED_CAST") val bs = data["budgets"] as List<Map<String, Any?>>
         for ((k, b) in bs.withIndex()) {
-            val budget = SafeRegex.Budget()
+            val budget = SafeRegex.RegexBudget()
             @Suppress("UNCHECKED_CAST") val ops = b["ops"] as List<List<Any?>>
             @Suppress("UNCHECKED_CAST") val res = b["res"] as List<Boolean>
             for ((i, op) in ops.withIndex()) assertEquals("budget #$k op $i", res[i], budget.charge(op[0] as String, int(op[1])))

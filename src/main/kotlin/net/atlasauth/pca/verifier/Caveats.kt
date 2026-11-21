@@ -75,8 +75,8 @@ object Caveats {
         if (type == "max_spend") return maxSpend(caveat, ctx)
         val now = fin(ctx["now"]) ?: return false
         return when (type) {
-            "expires" -> fin(caveat["at"])?.let { now < it } ?: false
-            "not_before" -> fin(caveat["at"])?.let { now >= it } ?: false
+            "expires" -> { val at = fin(caveat["at"]); at != null && now < at }
+            "not_before" -> { val at = fin(caveat["at"]); at != null && now >= at }
             "rate" -> {
                 val max = fin(caveat["max"])
                 val per = fin(caveat["per_secs"])
@@ -84,7 +84,10 @@ object Caveats {
                 if (max == null || per == null || per <= 0 || times !is List<*>) false
                 else {
                     val lo = now - per * 1000
-                    times.count { t -> fin(t)?.let { it > lo && it <= now } ?: false } < max
+                    // explicit loop, not Iterable.count / let: their inlined stdlib bodies only add debug-marker mutants
+                    var recent = 0
+                    for (t in times) { val x = fin(t); if (x != null && x > lo && x <= now) recent++ }
+                    recent < max
                 }
             }
             "max_blast_radius" -> {
@@ -99,7 +102,7 @@ object Caveats {
                 else {
                     val li = REVERSIBILITY_ORDER.indexOf(lim)
                     val ci = REVERSIBILITY_ORDER.indexOf(cur)
-                    li >= 0 && ci >= 0 && ci <= li
+                    ci in 0..li // li < 0 (unknown limit) makes the range empty: false, the same verdict as a separate li >= 0 check
                 }
             }
             "delegation_depth" -> {
@@ -107,7 +110,7 @@ object Caveats {
                 val d = fin(ctx["delegation_depth"])
                 max != null && d != null && d <= max
             }
-            "budget_alloc" -> fin(caveat["limit"])?.let { it >= 0 } ?: false
+            "budget_alloc" -> { val lim = fin(caveat["limit"]); lim != null && lim >= 0 }
             // Intent Layer v2 session binding (rule 13): no per-action constraint; satisfied iff well-formed.
             "intent_session" -> IntentSession.caveatError(caveat) == null
             else -> false
