@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId>
+  <artifactId>pca-fhe-seal</artifactId>
+  <version>0</version>
+  <description>Homomorphic risk-gate evaluation (BFV) over Microsoft SEAL's own C export API through JNA, wire-compatible with the TypeScript package (node-seal 5.1.x = SEAL 4.1.x). A separate module so the core library gains no native dependency; the native library libsealc is built from the pinned SEAL tag first (-Dpca.sealc.lib=/path/to/libsealc.so).</description>
+  <properties>
+    <pca.natives>${project.build.directory}/natives-in</pca.natives>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <pca.sealc.lib>libsealc.so</pca.sealc.lib>
+    <pca.fhe.corpus></pca.fhe.corpus>
+    <pca.fhe.required>false</pca.fhe.required>
+  </properties>
+  <dependencies>
+    <dependency><groupId>net.atlasauth</groupId><artifactId>pca-mutation</artifactId><version>0</version>
+      <exclusions><exclusion><groupId>jakarta.servlet</groupId><artifactId>jakarta.servlet-api</artifactId></exclusion></exclusions></dependency>
+    <dependency><groupId>net.java.dev.jna</groupId><artifactId>jna</artifactId><version>5.17.0</version></dependency>
+    <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.11.0</version><scope>test</scope></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.3</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <!-- per-platform native libraries (natives/<os>-<arch>/...) staged by the release workflow; absent in a plain source build -->
+    <resources><resource><directory>${pca.natives}</directory></resource></resources>
+    <plugins>
+      <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version>
+        <configuration><argLine>-Dpca.sealc.lib=${pca.sealc.lib} -Dpca.fhe.corpus=${pca.fhe.corpus} -Dpca.fhe.required=${pca.fhe.required}</argLine></configuration></plugin>
+    </plugins>
+  </build>
+</project>

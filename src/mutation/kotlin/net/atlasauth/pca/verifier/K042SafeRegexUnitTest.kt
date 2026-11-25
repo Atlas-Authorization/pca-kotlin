@@ -81,12 +81,12 @@ class K042SafeRegexUnitTest {
         assertEquals(false, SafeRegex.run(big, "a".repeat(487)))
     }
 
-    private fun state(b: SafeRegex.Budget, ev: Int, chars: Int, steps: Long, refusals: Int) {
+    private fun state(b: SafeRegex.RegexBudget, ev: Int, chars: Int, steps: Long, refusals: Int) {
         assertEquals("evaluations", ev, b.evaluations); assertEquals("chars", chars, b.chars); assertEquals("steps", steps, b.steps); assertEquals("refusals", refusals, b.refusals)
     }
 
     @Test fun budgetRefusesAnUncompilablePatternWithoutChargingIt() {
-        val b = SafeRegex.Budget()
+        val b = SafeRegex.RegexBudget()
         assertFalse(b.charge("(a", 5)); state(b, 0, 0, 0, 1)
         assertTrue(b.charge("ab", 3)); state(b, 1, 2, 12, 1)
         assertFalse(b.charge("a{65}", 0)); state(b, 1, 2, 12, 2)
@@ -94,7 +94,7 @@ class K042SafeRegexUnitTest {
     }
 
     @Test fun budgetEvaluationCapIs64ThenPoisoned() {
-        val b = SafeRegex.Budget()
+        val b = SafeRegex.RegexBudget()
         for (k in 1..64) { assertTrue("evaluation $k", b.charge("a", 1)); state(b, k, k, 4L * k, 0) }
         assertFalse(b.charge("a", 1)); state(b, 65, 64, 256, 1)
         assertFalse(b.charge("b", 0)); state(b, 65, 64, 256, 2)
@@ -102,25 +102,25 @@ class K042SafeRegexUnitTest {
 
     @Test fun budgetSourceCharCapIs8192() {
         val big = "a".repeat(4095)
-        val b = SafeRegex.Budget()
+        val b = SafeRegex.RegexBudget()
         assertTrue(b.charge(big, 0)); assertTrue(b.charge(big, 0)); state(b, 2, 8190, 8192, 0)
         assertTrue(b.charge("ab", 0)); state(b, 3, 8192, 8195, 0)
         assertFalse(b.charge("a", 0)); state(b, 65, 8192, 8195, 1)
         assertFalse(b.charge("a", 0)); state(b, 65, 8192, 8195, 2)
-        val c = SafeRegex.Budget()
+        val c = SafeRegex.RegexBudget()
         assertTrue(c.charge(big, 0)); assertTrue(c.charge(big, 0))
         assertFalse(c.charge("abc", 0)); state(c, 65, 8190, 8192, 1)
     }
 
     @Test fun budgetStepCapIs5MillionComputedInLong() {
-        val b = SafeRegex.Budget()
+        val b = SafeRegex.RegexBudget()
         assertTrue(b.charge("a", 2_499_999)); state(b, 1, 1, 5_000_000L, 0)
         assertFalse(b.charge("a", 0)); state(b, 65, 1, 5_000_000L, 1)
-        val c = SafeRegex.Budget()
+        val c = SafeRegex.RegexBudget()
         assertFalse(c.charge("a", 2_500_000)); state(c, 65, 0, 0, 1)
-        val d = SafeRegex.Budget()
+        val d = SafeRegex.RegexBudget()
         assertFalse(d.charge("a".repeat(4095), Int.MAX_VALUE - 1)); state(d, 65, 0, 0, 1)
-        val e = SafeRegex.Budget()
+        val e = SafeRegex.RegexBudget()
         assertTrue(e.charge("ab", 1_666_665)); assertTrue(e.charge("", 0)); state(e, 2, 2, 4_999_999L, 0)
         assertTrue(e.charge("", 0)); state(e, 3, 2, 5_000_000L, 0)
         assertFalse(e.charge("", 0)); state(e, 65, 2, 5_000_000L, 1)

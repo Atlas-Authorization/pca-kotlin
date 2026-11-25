@@ -114,7 +114,8 @@ object OracleFacts {
             if ("sub" != r["fn"] && "ratio_ppm" != r["fn"]) return "relational '$n': fn must be \"sub\" or \"ratio_ppm\""
             for (op in listOf(r["a"], r["b"])) {
                 var ok = IntentArtifacts.isParamPath(op)
-                if (!ok && op is String && op.startsWith("env.world.")) {
+                // an action.params path never starts with env.world., so ok is still false here
+                if (op is String && op.startsWith("env.world.")) {
                     val rest = op.substring("env.world.".length)
                     ok = rest in names && rest != n
                 }
@@ -385,8 +386,8 @@ object OracleFacts {
         if (os["session"] != session) return refuse("offers: the offer set is bound to another session")
         if (!clock) return refuse("offers: no usable clock (now must be a safe integer): the offer set counts as stale")
         val issued = IntentJs.num(os["issued_at"])!!
-        if (issued > now + skewMs) return refuse("offers: the offer set is issued in the future")
-        if (now - issued > IntentJs.num(policy["max_age_ms"])!!) return refuse("offers: the offer set is stale")
+        if (!(now.isFinite() && skewMs.isFinite() && issued <= now + skewMs)) return refuse("offers: the offer set is issued in the future")
+        if (!(now - issued <= IntentJs.num(policy["max_age_ms"])!!)) return refuse("offers: the offer set is stale")
         if (os["complete"] != true) return refuse("offers: the offer set is not declared complete")
         val filter = policy["filter"] as Map<*, *>
         if (!queryCovers(os["query"] as Map<*, *>, filter["query"] as Map<*, *>)) return refuse("offers: the search was narrowed beyond the intent filter (coverage)")

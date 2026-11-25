@@ -52,12 +52,11 @@ object IntentMap {
         else -> throw IllegalArgumentException("unknown leaf kind")
     }
 
-    internal fun u64be(n0: Long): ByteArray {
-        var n = n0
-        val out = ByteArray(8)
-        for (i in 7 downTo 0) { out[i] = (n and 0xff).toByte(); n = n ushr 8 }
-        return out
-    }
+    // eight stores, no loop: a loop here made every counter mutant spin for ever (a run error no test decides); the stores are killed by the exact-bytes tests
+    internal fun u64be(n: Long): ByteArray = byteArrayOf(
+        (n ushr 56).toByte(), (n ushr 48).toByte(), (n ushr 40).toByte(), (n ushr 32).toByte(),
+        (n ushr 24).toByte(), (n ushr 16).toByte(), (n ushr 8).toByte(), n.toByte(),
+    )
 
     /** SHA-256(TAG_kind || salt || strictCanonical(leaf)); throws on a leaf without a strict canonical form. */
     fun leafHash(kind: String, salt: ByteArray?, leaf: Any?): ByteArray {
@@ -244,16 +243,15 @@ object IntentMap {
             val d = IntentJs.obj(dims[j])
             val path = d["path"] as String
             val name = path.removePrefix("action.params.")
-            val present = path == "action.resource" || (params is Map<*, *> && params.containsKey(name))
-            val x = if (path == "action.resource") resource else if (present) (params as Map<*, *>)[name] else null
+            val x = if (path == "action.resource") resource else IntentJs.get(params, name)
             var i = -1L
             if (d["kind"] == "num") {
-                if (present && IntentJs.isInt(x)) {
+                if (IntentJs.isInt(x)) {
                     val v = num(x)
                     val cs = numCells(d)
                     for (k in cs.indices) if (v >= cs[k][0] && v <= cs[k][1]) { i = k.toLong(); break }
                 }
-            } else if (present && x is String && !Json.hasLoneSurrogate(x)) {
+            } else if (x is String && !Json.hasLoneSurrogate(x)) {
                 val vs = d["values"] as List<*>
                 var best = -1
                 var bestLen = -1

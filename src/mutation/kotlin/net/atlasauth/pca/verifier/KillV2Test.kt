@@ -24,11 +24,10 @@ class KillV2Test {
 
         /**
          * Where Kotlin knowingly differs from the reference, its exact checks (`name|ok|reason`, one per reported check):
-         * reason texts of other files (ActionSchema), suites this verifier does not implement (FN-DSA), JS-only object
+         * suites this verifier does not implement (FN-DSA), JS-only object
          * semantics (`__proto__`), and inputs the wire check refuses before the v2 checks run (Kotlin's typed failure).
          */
         val KOTLIN: Map<String, String> = mapOf(
-            "corpus/schema-note-too-long" to "schema|false|schema_violation: out_of_domain: 'action.params.note': longer than the declared max_len\nintent_session|true|null\naccumulators|true|null",
             "corpus/session-wire-not-object" to "schema|false|intent_session.schema names no schema this verifier accepts\nintent_session|false|intent_session error (fail closed): ClassCastException\n" +
                 "accumulators|false|accumulators error (fail closed): ClassCastException\nfacts|false|facts: the W-B context is malformed: intent_session must be an object",
             "corpus/acc-state-own-proto-key" to "schema|true|null\nintent_session|true|null\naccumulators|false|no state for site-local accumulator 'trip_spend'",

@@ -89,7 +89,7 @@ class PqChainTest {
                 val badEd = LinkedHashMap(root); badEd["sig"] = edSign("agent", byteArrayOf(1))
                 assertEquals("hop 0: bad signature (not signed by expected key)", Pca.verifyChain(l(badEd), issuer, true, null, pins, null))
             }
-            assertEquals("hop 0: signature suite is not allowed by this verifier's suite policy", Pca.verifyChain(chain, issuer, true, listOf("ed25519"), pins, null))
+            assertEquals("hop 0: signature suite '$alg' is not allowed by this verifier's suite policy", Pca.verifyChain(chain, issuer, true, listOf("ed25519"), pins, null))
             assertEquals("", Pca.verifyChain(chain, issuer, true, listOf(alg), pins, null))
         }
     }
