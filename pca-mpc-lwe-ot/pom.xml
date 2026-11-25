@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Kotlin face of the Java adapter net.atlasauth:pca-mpc-lwe-ot (the post-quantum endemic base OT over liblweot through JNA). A separate module so the
+     core library gains no native dependency. Install the Java core library and the adapter first (CI does: mvn install -DskipTests in java-pca and in
+     java-pca/adapters/pca-mpc-lwe-ot), then
+     mvn test -Dpca.lweot.lib=/path/to/liblweot.so -Dpca.lweot.required=true -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId><artifactId>pca-mpc-lwe-ot-kotlin</artifactId><version>0</version>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kotlin.version>2.0.21</kotlin.version>
+    <pca.lweot.lib>liblweot.so</pca.lweot.lib>
+    <pca.lweot.required>false</pca.lweot.required>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>${kotlin.version}</version></dependency>
+    <dependency><groupId>net.atlasauth</groupId><artifactId>pca-mpc-lwe-ot</artifactId><version>0</version></dependency>
+    <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.11.0</version><scope>test</scope></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>
+        <configuration><jvmTarget>17</jvmTarget></configuration>
+        <executions>
+          <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals></execution>
+          <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals></execution>
+        </executions>
+      </plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version>
+        <configuration><argLine>-Dpca.lweot.lib=${pca.lweot.lib} -Dpca.lweot.required=${pca.lweot.required}</argLine></configuration></plugin>
+    </plugins>
+  </build>
+</project>

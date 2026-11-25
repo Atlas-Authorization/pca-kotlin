@@ -11,7 +11,7 @@ import org.junit.Test
  * Rule 14 differential against the TS reference (test-data/k042-actionschema.json, written by
  * tools/pca-audit/java-mutate/k042-actionschema-oracle.mts): shape / verify / paramValueViolation / conform /
  * accumulationParams / canonProjection on targeted inputs at the boundary of every rule. Inputs are raw JSON text.
- * Exact reasons are compared except the four value-domain reasons that omit the bound (see [kotlinReason]).
+ * Reasons are compared exactly.
  */
 class K042ActionSchemaTest {
     companion object {
@@ -21,10 +21,7 @@ class K042ActionSchemaTest {
         @Suppress("UNCHECKED_CAST")
         fun cases(kind: String) = data[kind] as List<Map<String, Any?>>
         fun j(raw: Any?): Any? = IntentJs.normalize(Json.parseLenient(raw as String))
-        fun kotlinReason(ts: String?): String? = ts?.replace(Regex("longer than \\d+ UTF-8 bytes$"), "longer than the declared max_len")
-            ?.replace(Regex("below min -?\\d+$"), "below min")
-            ?.replace(Regex("above max -?\\d+$"), "above max")
-            ?.replace(Regex("array items must be strings of at most \\d+ UTF-8 bytes$"), "array items must be strings within max_len UTF-8 bytes")
+        fun kotlinReason(ts: String?): String? = ts
     }
 
     private fun report(bad: List<String>, n: Int) = assertEquals("${bad.size}/$n mismatches:\n" + bad.take(60).joinToString("\n"), 0, bad.size)
@@ -44,9 +41,9 @@ class K042ActionSchemaTest {
         val base = cases("shape").first { it["name"] == "shape/base" }["doc"]
         val d = LinkedHashMap(IntentJs.obj(j(base)))
         d["state"] = j("[-0]")
-        assertEquals("malformed schema: canonicalize: negative zero is not allowed", ActionSchema.shapeError(d))
+        assertEquals("malformed schema: canonicalize: negative zero", ActionSchema.shapeError(d))
         d["state"] = j("[1e21]")
-        assertEquals("malformed schema: canonicalize: integer outside the safe range", ActionSchema.shapeError(d))
+        assertEquals("malformed schema: canonicalize: integer outside the safe range (|n| > 2^53-1)", ActionSchema.shapeError(d))
     }
 
     @Test fun paramValueViolation() {

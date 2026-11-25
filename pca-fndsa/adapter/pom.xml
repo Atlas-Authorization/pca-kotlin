@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>net.atlasauth</groupId>
+  <artifactId>pca-fndsa</artifactId>
+  <version>0</version>
+  <description>FN-DSA (FIPS 206 draft, Thomas Pornin's fn-dsa 0.4.0) backend for the PCA crypto-agility seam: JNA over a small C library (libfndsa) built from the flagship's crate. A separate module so the core library gains no native dependency; build libfndsa first and set ATLAS_PCA_LIBFNDSA (or -Dpca.fndsa.lib).</description>
+  <properties>
+    <pca.natives>${project.build.directory}/natives-in</pca.natives>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <!-- the PCA Java library, installed into the local Maven repository first; the core pom gains nothing -->
+    <dependency><groupId>net.atlasauth</groupId><artifactId>pca-mutation</artifactId><version>0</version>
+      <exclusions><exclusion><groupId>jakarta.servlet</groupId><artifactId>jakarta.servlet-api</artifactId></exclusion></exclusions></dependency>
+    <dependency><groupId>net.java.dev.jna</groupId><artifactId>jna</artifactId><version>5.17.0</version></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.3</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <!-- per-platform native libraries (natives/<os>-<arch>/...) staged by the release workflow; absent in a plain source build -->
+    <resources><resource><directory>${pca.natives}</directory></resource></resources>
+    <plugins>
+      <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+      <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin>
+    </plugins>
+  </build>
+</project>

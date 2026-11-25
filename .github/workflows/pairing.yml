@@ -1,0 +1,58 @@
+name: Pairing packages
+
+# pca-aggsig, pca-bbs and pca-abe on BLS12-381 (pca-pairing). Curve and pairing work is supranational blst; ABE's GT
+# operations are a small shim over blst's public API (the same C sources as the Java binding), built here from the pinned blst
+# source into one shared library that the tests load.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BLST_TAG: v0.3.16
+  BLST_COMMIT: e7f90de551e8df682f3cc99067d204d8b90d27ad
+  # the core verifier sources compiled with the module use the FFM API (JDK 22+), as in ci.yml
+  JDK_JAVA_OPTIONS: --enable-native-access=ALL-UNNAMED
+
+jobs:
+  pairing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (full shared corpus from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca --less
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Secret-key oracle corpus (abe; generated, never committed)
+        run: .github/scripts/gen-secret-corpus.sh "$PCA_MONO_SDK/pca-pairing/test-data" abe:abe
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+          cache: maven
+      - name: blst at the pinned commit
+        run: |
+          git clone --quiet --depth 1 --branch "$BLST_TAG" https://github.com/supranational/blst "$RUNNER_TEMP/blst"
+          test "$(git -C "$RUNNER_TEMP/blst" rev-parse HEAD)" = "$BLST_COMMIT"
+      - name: "Build the GT shim (libpcagt.so: shim + JNI wrapper + blst)"
+        working-directory: ${{ env.PCA_MONO_SDK }}/pca-pairing
+        run: |
+          mkdir -p target/native
+          cc -O2 -fPIC -shared -D__BLST_PORTABLE__ \
+            -I"$RUNNER_TEMP/blst/bindings" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            -o target/native/libpcagt.so \
+            src/main/c/pca_gt.c src/main/c/pca_gt_jni.c "$RUNNER_TEMP/blst/src/server.c" "$RUNNER_TEMP/blst/build/assembly.S"
+      - name: aggsig, bbs and abe (vendored vectors, the reference corpora, independent FAME vectors)
+        working-directory: ${{ env.PCA_MONO_SDK }}/pca-pairing
+        run: mvn -B -ntp test

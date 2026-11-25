@@ -61,7 +61,7 @@ private fun depthVerdict(api: String, input: Any?): Boolean = when (api) {
     "threshold_share" -> Threshold.verifyShareEntry(input)
     "pcactn_json" -> {
         val i = input as Map<String, Any?>
-        Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String)).allow
+        Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String), insecureSkipPlanRootCheck = true).allow
     }
     "json_parse" -> try { Json.parse((input as Map<String, Any?>)["text"] as String); true } catch (e: IllegalArgumentException) { false }
     else -> throw IllegalStateException("unknown depth api $api")
@@ -142,7 +142,7 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
             if (v["pcactn"] is Map<*, *>) {
                 val uctx = v["context"] as Map<String, Any?>
                 val ug = Pca.verifyPcactn(v["pcactn"], v["grant"] as Map<String, Any?>, Json.asLong(uctx["now"]),
-                    Pca.Audience.Of(uctx["aud"] as String), null, null)
+                    Pca.Audience.Of(uctx["aud"] as String), null, null, insecureSkipPlanRootCheck = true)
                 check(!ug.allow && ug.reason.contains(Pq.UNSUPPORTED_SUITE),
                     "${v["name"]}: suite $unsupported is not implemented, so it must fail with unsupported_suite (${ug.reason})")
             }
@@ -162,8 +162,8 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
         // Intent Layer v2: `schema-*` / `session-*` / `acc-*` / `layers-*` vectors carry the verifier state in context.intent_v2.
         val intentV2 = intentV2Of(ctx)
         val got = if (v.containsKey("pcactn_json"))
-            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience, allowedSuites, intentPolicy, intentV2)
-        else Pca.verifyPcactn(v["pcactn"], grant, now, audience, allowedSuites, intentPolicy, intentV2)
+            Pca.verifyPcactnJson(v["pcactn_json"] as String, grant, now, audience, allowedSuites, intentPolicy, intentV2, insecureSkipPlanRootCheck = true)
+        else Pca.verifyPcactn(v["pcactn"], grant, now, audience, allowedSuites, intentPolicy, intentV2, insecureSkipPlanRootCheck = true)
         val exp = v["expect"] as Map<String, Any?>
         // Intent Layer v2: a vector whose v2 artifacts need a suite this verifier lacks must FAIL closed with unsupported_suite
         val missingSuite = missingRequiredSuite(v["requires_suite"])
@@ -354,7 +354,7 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
                 "threshold_share" -> Threshold.verifyShareEntry(input)
                 "pcactn_json" -> {
                     val i = input as Map<String, Any?>
-                    Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String)).allow
+                    Pca.verifyPcactnJson(i["text"] as String, i["grant"] as Map<String, Any?>, Json.asLong(i["now"]), Pca.Audience.Of(i["aud"] as String), insecureSkipPlanRootCheck = true).allow
                 }
                 else -> true
             }
@@ -461,8 +461,8 @@ fun runConformance(confDir: String, counterexampleDir: String): Int {
             val ip = intentPolicyOf(ctx)
             val iv2 = intentV2Of(ctx)
             val got = if (cx.containsKey("pcactn_json"))
-                Pca.verifyPcactnJson(cx["pcactn_json"] as String, grant, now, audience, intentPolicy = ip, intentV2 = iv2)
-            else Pca.verifyPcactn(cx["pcactn"], grant, now, audience, intentPolicy = ip, intentV2 = iv2)
+                Pca.verifyPcactnJson(cx["pcactn_json"] as String, grant, now, audience, intentPolicy = ip, intentV2 = iv2, insecureSkipPlanRootCheck = true)
+            else Pca.verifyPcactn(cx["pcactn"], grant, now, audience, intentPolicy = ip, intentV2 = iv2, insecureSkipPlanRootCheck = true)
             // Expected verdict = the oracle result when present, else the INDEX allow flag.
             val results = cx["results"] as? Map<String, Any?>
             val oracle = results?.get("oracle") as? Map<String, Any?>

@@ -29,7 +29,7 @@ object Threshold {
     /** Version marker for the v2.1 agent-leaf share binding (matches `vectors.json.agent_leaf_binding`). */
     const val AGENT_LEAF_SHARE_BINDING_VERSION = "2.1"
 
-    private fun utf8(s: String): ByteArray = s.toByteArray(StandardCharsets.UTF_8)
+    private fun utf8(s: String): ByteArray = Json.utf8(s)
 
     /**
      * `sha256(DOMAIN || canonical(sorted [{publicKey, role[, pq_pk]}]))`, the rows sorted bytewise by
@@ -106,6 +106,9 @@ object Threshold {
         }
         return reg
     }
+
+    /** Collect shares into a threshold signature `{shares}` (defensively copied). */
+    fun assembleThreshold(shares: List<Any?>?): Map<String, Any?> = linkedMapOf("shares" to ArrayList<Any?>(shares ?: emptyList()))
 
     /** The signer-set hash (base64url) of a raw signer set; null when it is not a list of objects with string role / publicKey. */
     fun signerSetHashB64u(signerSet: Any?): String? = try {

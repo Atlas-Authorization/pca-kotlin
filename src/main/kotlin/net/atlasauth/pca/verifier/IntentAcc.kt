@@ -6,6 +6,7 @@ package net.atlasauth.pca.verifier
  * post-action value from its own pre-state (site-local) or from a sequencer-signed receipt, and the agent's signed claim
  * must equal it.
  */
+@Suppress("UNCHECKED_CAST")
 object IntentAcc {
     const val MAX_SESSION_ACCUMULATORS = 16
     const val MAX_SESSION_MONITORS = 16
@@ -23,10 +24,13 @@ object IntentAcc {
     /** Default bound on a key set's age, policy `acc.max_keyset_age_s` (1 h). */
     const val DEFAULT_MAX_KEYSET_AGE_MS = 3_600_000L
     private const val MAX_SAFE = 9007199254740991L
-    internal val ACC_AGGS = listOf("sum", "count", "distinct", "max")
-    internal val MONITOR_KINDS = listOf("requires_prior", "precedes", "never", "always", "responds_within")
-    internal val ACC_ID_RE = Regex("[A-Za-z0-9_]{1,64}")
-    internal val KID_RE = Regex("[A-Za-z0-9_.:-]{1,64}")
+    val ACC_AGGS: List<String> = listOf("sum", "count", "distinct", "max")
+
+    /** The scopes an accumulator may carry. */
+    val ACC_SCOPES: List<String> = listOf("session", "principal", "org", "fleet")
+    val MONITOR_KINDS: List<String> = listOf("requires_prior", "precedes", "never", "always", "responds_within")
+    val ACC_ID_RE = Regex("[A-Za-z0-9_]{1,64}")
+    val KID_RE = Regex("[A-Za-z0-9_.:-]{1,64}")
     private val PARAM_PATH_RE = Regex("action\\.params\\.[A-Za-z0-9_]{1,64}")
     private val UNIT_RE = Regex("[a-z0-9_]+(?:\\.[a-z0-9_]+)*")
     private val RECEIPT_KEYS = listOf(
@@ -167,7 +171,7 @@ object IntentAcc {
     /** val(omega): a value (and the distinct key), or the reason it has none. */
     internal class AccValue(val reason: String?, val value: Long, val key: String?)
 
-    internal fun distinctKey(x: Any?): String? {
+    fun distinctKey(x: Any?): String? {
         if (x is String || IntentJs.isInt(x)) {
             return try { IntentJs.canon(x) } catch (e: RuntimeException) { null }
         }
@@ -407,7 +411,7 @@ object IntentAcc {
             if (!(ksIssued <= now + RECEIPT_SKEW_MS) || !(now - ksIssued <= maxKeySetAgeMs)) continue
             val e = (IntentJs.get(kO, "keys") as List<*>).firstOrNull { r["kid"] == IntentJs.get(it, "kid") }?.let { IntentJs.obj(it) } ?: continue
             if (e["pk"] != r["signer"] || issued < IntentJs.num(e["not_before"])!!) continue
-            if (e.containsKey("not_after") && (issued > IntentJs.num(e["not_after"])!! || IntentJs.num(e["not_after"])!! < now - RECEIPT_SKEW_MS)) continue
+            if (e.containsKey("not_after") && (issued > IntentJs.num(e["not_after"])!! || !(IntentJs.num(e["not_after"])!! >= now - RECEIPT_SKEW_MS))) continue
             val es = IntentJs.suiteOf(e)
             if ((es ?: "ed25519") != (rs ?: "x")) continue
             val pin = if (e.containsKey("pq_pk")) IntentJs.pin(e["pk"] as String, e["pq_pk"]) else null
@@ -415,4 +419,98 @@ object IntentAcc {
         }
         return false
     }
+
+    // ---- the reference's own surface: monitor states, key order, receipt and key-set signing and digests ----
+
+    private fun jsKind(m: Any?): Any? {
+        if (m == null) throw IllegalArgumentException("Cannot read properties of null (reading 'kind')")
+        return IntentJs.get(m, "kind")
+    }
+
+    /** The state set Q of a monitor (`{kind, within?}`): a closed categorical dimension. A kind with no states has none. */
+    @JvmStatic fun monitorStates(m: Any?): List<String>? {
+        jsKind(m)
+        // every known kind has at least one state: an empty list is a kind the switch does not cover, which the reference returns as undefined
+        return monitorStates(IntentJs.obj(m)).ifEmpty { null }
+    }
+
+    /** The state a monitor starts in: `unmet`, `clean`, `ok` or `idle` by kind. */
+    @JvmStatic fun monitorInitialState(m: Any?): String = when (jsKind(m)) {
+        "requires_prior", "precedes" -> "unmet"
+        "never" -> "clean"
+        "always" -> "ok"
+        else -> "idle"
+    }
+
+    /** A set of distinct keys in canonical (UTF-8 byte) order. */
+    @JvmStatic fun sortedDistinct(keys: Collection<String>): List<String> = IntentJs.sortedUtf8(LinkedHashSet(keys))
+
+    private fun requireMembers(o: Map<String, Any?>, keys: List<String>) {
+        for (k in keys) if (!o.containsKey(k)) throw IllegalArgumentException("canonicalize: unsupported type undefined")
+    }
+
+    /**
+     * Sign a reservation receipt `{v, kind, session, acc, seq, pre, delta, post, pcactn_digest, aud, issued_at, expires_at, kid, ledger: {index, head}}` as the sequencer
+     * (Ed25519, ML-DSA-65 or hybrid): `signer` is derived from the key; a non-default suite adds `alg` and `pq_pk` (signed) and, for a hybrid, `pq_sig`. Throws when the signed
+     * receipt does not pass its shape check.
+     */
+    @JvmStatic fun signAccReceipt(body: Map<String, Any?>, sequencer: Keys.SuiteKey): Map<String, Any?> {
+        val signerId = (sequencer.ed ?: throw IllegalArgumentException("signAccReceipt: the sequencer needs an Ed25519 identity")).id()
+        requireMembers(body, listOf("v", "kind", "session", "acc", "seq", "pre", "delta", "post", "pcactn_digest", "aud", "issued_at", "expires_at", "kid", "ledger"))
+        val withSigner = LinkedHashMap(body)
+        withSigner["signer"] = signerId
+        val base = LinkedHashMap(receiptBody(withSigner))
+        val bound = IntentJs.bindSuiteFields(base, sequencer.alg, true, sequencer.pqPk(), sequencer.pqPk() != null)
+        val sg = sequencer.sign(IntentJs.message(ACC_RECEIPT_DOMAIN, bound))
+        val out = LinkedHashMap(bound)
+        out["sig"] = sg.first
+        if (sg.second != null) out["pq_sig"] = sg.second
+        receiptShapeError(out)?.let { throw IllegalArgumentException("signAccReceipt: $it") }
+        return out
+    }
+
+    /** True iff the receipt is well formed, names `expectedSigner` and verifies under it (a PQ key only as pinned: `pin` is `{pqPins}`'s map). Never throws. */
+    @JvmStatic fun verifyAccReceiptSignature(r: Any?, expectedSigner: String, pqPins: Map<String, Any?>? = null): Boolean =
+        r is Map<*, *> && verifyReceiptSignature(IntentJs.obj(r), expectedSigner, pqPins)
+
+    /** The receipt's content address (what `intent_session.acc[].receipt` carries). */
+    @JvmStatic fun accReceiptDigest(r: Any?): String = receiptDigest(r)
+
+    const val ACC_RECEIPT_CORE_DOMAIN = "atlas-pca/acc-receipt-core/v1"
+
+    /** The receipt's log-leaf content: the receipt without its ledger position, key id and signature fields (two receipts with one `(session, acc, seq)` and different cores are provable equivocation). */
+    @JvmStatic fun accReceiptCoreDigest(r: Any?): String {
+        val m = r as? Map<String, Any?> ?: throw IllegalArgumentException("Cannot read properties of ${if (r == null) "null" else "undefined"} (reading 'v')")
+        val keys = listOf("v", "kind", "session", "acc", "seq", "pre", "delta", "post", "pcactn_digest", "aud", "issued_at", "expires_at")
+        requireMembers(m, keys)
+        val core = LinkedHashMap<String, Any?>()
+        for (k in keys) core[k] = m[k]
+        return IntentJs.hashCanonical(linkedMapOf("d" to ACC_RECEIPT_CORE_DOMAIN, "r" to core))
+    }
+
+    /** Sign a sequencer key set `{v, kind, version, issued_at, keys}` as the root (Ed25519, ML-DSA-65 or hybrid); `sequencer` is derived from the key. Throws when the signed set fails its shape check. */
+    @JvmStatic fun signSequencerKeySet(body: Map<String, Any?>, root: Keys.SuiteKey): Map<String, Any?> {
+        val rootId = (root.ed ?: throw IllegalArgumentException("signSequencerKeySet: the root needs an Ed25519 identity")).id()
+        requireMembers(body, listOf("v", "kind", "version", "issued_at", "keys"))
+        val base = LinkedHashMap<String, Any?>()
+        for (k in listOf("v", "kind")) base[k] = body[k]
+        base["sequencer"] = rootId
+        for (k in listOf("version", "issued_at", "keys")) base[k] = body[k]
+        val bound = IntentJs.bindSuiteFields(IntentJs.normalize(base) as Map<String, Any?>, root.alg, true, root.pqPk(), root.pqPk() != null)
+        val sg = root.sign(IntentJs.message(SEQUENCER_KEYS_DOMAIN, bound))
+        val out = LinkedHashMap(bound)
+        out["sig"] = sg.first
+        if (sg.second != null) out["pq_sig"] = sg.second
+        keySetShapeError(out)?.let { throw IllegalArgumentException("signSequencerKeySet: $it") }
+        return out
+    }
+
+    /** Verify a key set under the session's pinned `root` (and the root's pinned PQ key, `rootPqPk`, for a PQ suite). Never throws. */
+    @JvmStatic @JvmOverloads fun verifySequencerKeySet(k: Any?, root: String, rootPqPk: String? = null): Boolean = verifyKeySet(k, root, rootPqPk, rootPqPk != null)
+
+    /** A key set's content address. */
+    /** The reference's `sequencerKeySetShapeError`: null for a well-formed signed key set, else the first problem. */
+    @JvmStatic fun sequencerKeySetShapeError(k: Any?): String? = keySetShapeError(k)
+
+    @JvmStatic fun sequencerKeySetDigest(ks: Any?): String = keySetDigest(ks)
 }
