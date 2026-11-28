@@ -1,0 +1,55 @@
+name: ZK
+
+# pca-zk: the Kotlin face of the Java adapter that runs Groth16 verification and proving of snarkjs artifacts (BN254, BLS12-381) through JNA over libpcazk,
+# built here from the flagship's crate. The Kotlin test replays the whole 1429-case reference corpus of the zk compliance module with the real pairing engine
+# (the core job replays it up to the pairing check).
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (full shared corpus and the Groth16 crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: libpcazk (cargo build --features capi)
+        run: echo "ATLAS_PCA_LIBPCAZK=$(.github/scripts/build-libpcazk.sh "$RUNNER_TEMP/pcazk" "$RUNNER_TEMP/mono/packages/pca-zk/crate" | tail -1)/libpcazk.so" >> "$GITHUB_ENV"
+      - name: Java core library from the pca-java mirror
+        shell: bash
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY_OWNER:-Atlas-Authorization}/pca-java.git"
+          REF="${GITHUB_REF_NAME:-main}"
+          git ls-remote --exit-code "$URL" "refs/heads/$REF" "refs/tags/$REF" >/dev/null 2>&1 || REF=main
+          git clone -q --depth 1 --branch "$REF" "$URL" "$RUNNER_TEMP/pca-java"
+          mvn -B -ntp -q -f "$RUNNER_TEMP/pca-java/pom.xml" install -DskipTests
+      - name: Java adapter (pca-zk), vendored into this tree from the monorepo's java-pca at the same ref
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          test -f pca-zk/adapter/pom.xml || { echo "::error::pca-zk/adapter is missing: the mirror sync vendors the Java adapter at this ref"; exit 1; }
+          mvn -B -ntp -f pca-zk/adapter/pom.xml install -DskipTests
+      - name: Reference corpus replay over libpcazk (1429 cases; every function, a missing file fails)
+        working-directory: ${{ env.PCA_MONO_SDK }}/pca-zk
+        env:
+          ATLAS_PCA_LIBPCAZK_REQUIRED: '1'
+        run: |
+          test -s ../test-data/ref-zk.json.gz
+          mvn -B -ntp test

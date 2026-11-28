@@ -83,6 +83,14 @@ object IntentSession {
     /** The goal a session grant commits to: `pca-intent:v2:<session>:<map_digest>`. */
     fun intentGoalV2(session: String, mapDigest: String): String = "$INTENT_GOAL_V2_PREFIX$session:$mapDigest"
 
+    /** The `{session, mapDigest}` of a `pca-intent:v2:<session>:<map_digest>` goal (both 32-byte canonical base64url), else null. */
+    fun parseIntentGoalV2(goal: Any?): Map<String, Any?>? {
+        if (goal !is String || !goal.startsWith(INTENT_GOAL_V2_PREFIX)) return null
+        val parts = goal.substring(INTENT_GOAL_V2_PREFIX.length).split(":")
+        if (parts.size != 2 || !b32(parts[0]) || !b32(parts[1])) return null
+        return linkedMapOf("session" to parts[0], "mapDigest" to parts[1])
+    }
+
     /** The goal a session grant over a COMMITTED map commits to (rule 19): `pca-intent:v2c:<session>:<map_commit>`. */
     fun intentGoalV2c(session: String, mapCommit: String): String = "$INTENT_GOAL_V2C_PREFIX$session:$mapCommit"
 
@@ -132,21 +140,21 @@ object IntentSession {
             }
             val sc = s["schema"]
             val scAud = IntentJs.get(sc, "aud")
-            if (!sortedKeysAre(sc, "aud", "digest") || scAud !is String || scAud.isEmpty() || !b32(IntentJs.get(sc, "digest")))
+            if (scAud !is String || scAud.isEmpty() || !b32(IntentJs.get(sc, "digest")) || !sortedKeysAre(sc, "aud", "digest"))
                 return "schema must be {aud, digest}"
             val layers = s["layers"]
             if (layers !is Map<*, *>) return "layers must be an object"
             for (k in layers.keys) if (k !in listOf("org", "std", "task")) return "layers: unknown member '$k'"
             val task = IntentJs.get(layers, "task")
-            if (!sortedKeysAre(task, "map_digest") || !b32(IntentJs.get(task, "map_digest"))) return "layers.task must be {map_digest}"
+            if (!b32(IntentJs.get(task, "map_digest")) || !sortedKeysAre(task, "map_digest")) return "layers.task must be {map_digest}"
             val org = IntentJs.get(layers, "org")
             if (IntentJs.own(layers, "org") && (org !is Map<*, *> || !b32(IntentJs.get(org, "digest")))) return "layers.org must be an object with a 32-byte digest (absent = no org layer; null is malformed)"
             val std = IntentJs.get(layers, "std")
             if (IntentJs.own(layers, "std")) {
                 val prof = IntentJs.get(std, "profile")
                 val ver = IntentJs.get(std, "version")
-                if (!sortedKeysAre(std, "digest", "profile", "version") || prof !is String || prof.isEmpty() || IntentJs.u8len(prof) > 128 ||
-                    !(IntentJs.isInt(ver) && IntentJs.num(ver)!! >= 1) || !b32(IntentJs.get(std, "digest"))
+                if (prof !is String || prof.isEmpty() || IntentJs.u8len(prof) > 128 ||
+                    !(IntentJs.isInt(ver) && IntentJs.num(ver)!! >= 1) || !b32(IntentJs.get(std, "digest")) || !sortedKeysAre(std, "digest", "profile", "version")
                 ) return "layers.std must be {profile, version >= 1, digest} (absent = no standing profile; null is malformed)"
             }
             val accs = s["accumulators"]
@@ -219,7 +227,7 @@ object IntentSession {
             var pin: Map<String, Any?>? = null
             val suite = Pq.resolveSigAlg(s["alg"], s.containsKey("alg"))
             if (suite != null && suite.needsPqPk) {
-                val pv = if (pqPins is Map<*, *> && pqPins.containsKey(signer)) pqPins[signer] else null
+                val pv = if (pqPins is Map<*, *>) pqPins[signer] else null
                 if (pv !is String) return "session root suite '${suite.alg}' needs the signer's PQ key pinned by the verifier (pq_pins); the root's own principals entry proves nothing about who signed it"
                 if (!s.containsKey("pq_pk") || s["pq_pk"] != pv) return "session root pq_pk does not match the verifier's pin for the signer"
                 if (p.containsKey("pq_pk") && p["pq_pk"] != pv) return "session root pq_pk does not match the signer's principals entry"

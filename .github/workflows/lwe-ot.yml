@@ -1,0 +1,50 @@
+name: Endemic LWE base OT
+
+# pca-mpc-lwe-ot: the Kotlin face of the Java adapter that runs the post-quantum endemic base OT through JNA over a small C library (liblweot) that
+# wraps the audited pqc_kyber K-PKE (built here from the flagship's crate). The Kotlin tests replay the TypeScript reference corpus, byte for byte.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lwe-ot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (full shared corpus and the lattice crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: liblweot (cargo build --features capi)
+        run: echo "LWEOT_LIB=$(.github/scripts/build-liblweot.sh "$RUNNER_TEMP/lweot" "$RUNNER_TEMP/mono/packages/pca-mpc-lwe-ot-wasm/crate" | tail -1)/liblweot.so" >> "$GITHUB_ENV"
+      - name: Java core library from the pca-java mirror
+        shell: bash
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY_OWNER:-Atlas-Authorization}/pca-java.git"
+          REF="${GITHUB_REF_NAME:-main}"
+          git ls-remote --exit-code "$URL" "refs/heads/$REF" "refs/tags/$REF" >/dev/null 2>&1 || REF=main
+          git clone -q --depth 1 --branch "$REF" "$URL" "$RUNNER_TEMP/pca-java"
+          mvn -B -ntp -q -f "$RUNNER_TEMP/pca-java/pom.xml" install -DskipTests
+      - name: Java adapter (pca-mpc-lwe-ot), vendored into this tree from the monorepo's java-pca at the same ref
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          test -f pca-mpc-lwe-ot/adapter/pom.xml || { echo "::error::pca-mpc-lwe-ot/adapter is missing: the mirror sync vendors the Java adapter at this ref"; exit 1; }
+          mvn -B -ntp -f pca-mpc-lwe-ot/adapter/pom.xml install -DskipTests
+      - name: Endemic OT replay
+        working-directory: ${{ env.PCA_MONO_SDK }}/pca-mpc-lwe-ot
+        run: mvn -B -ntp test -Dpca.lweot.lib="$LWEOT_LIB" -Dpca.lweot.required=true

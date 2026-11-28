@@ -1,0 +1,261 @@
+name: Native package
+
+# The ristretto255 / Ed25519 group layer (ratchet, OPRF, FROST, MPC) runs on libsodium through lazysodium-java, whose jar bundles libsodium for Linux (x86-64, arm64),
+# macOS (Intel, Apple silicon) and Windows. This check resolves the pinned lazysodium-java from Maven Central and fails the release if the jar stops carrying any of
+# them, so no consumer needs to install libsodium.
+#
+# The opt-in native modules ship their libraries inside their own jar, at natives/<os>-<arch>/ (extracted to a private temp file on first use), so a user adds the
+# dependency and nothing else. Built here on each platform's own runner (JVM only; Android is not supported by these modules). Load order: an explicit override (system property or environment variable) first, then the jar copy, then the system:
+#   pca-pairing     libpcagt       blst v0.3.16 + GT shim + JNI wrapper     linux x64/arm64, macOS x64/arm64, windows x64
+#   pca-mpc-lwe-ot  liblweot       cargo --features capi                    same five   (in the Java adapter jar the module depends on)
+#   pca-fndsa       libfndsa       cargo --features capi                    same five   (in the Java adapter jar the module depends on)
+#   pca-zk          libpcazk       cargo --features capi (arkworks)         same five   (in the Java adapter jar the module depends on)
+#   pca-fhe-seal    sealc          Microsoft SEAL 4.1.2 C export            all five (Windows: sealc.dll from the shared build script's Windows support)
+#   pca-natives     atlas_less     sdks/pca-less-c, found by LessNative     all five (Windows: atlas_less.dll from the shared build script's Windows support)
+#                   pca-wasmtime-host + its SHA-256 pin (sandbox)           all five
+# OpenSSL is not used by this SDK. Each jar set is then installed on a clean runner (no checkout, no toolchain, no env vars) and each library is loaded and called.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SEAL_TAG: v4.1.2
+  BLST_TAG: v0.3.16
+
+jobs:
+  bundled-libsodium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (full shared corpus from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - name: The pinned lazysodium-java jar carries libsodium for every desktop platform
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's|^lazysodium = "\(.*\)"|\1|p' gradle/libs.versions.toml | head -1)
+          [ -n "$v" ] || { echo "::error::lazysodium-java version not found"; exit 1; }
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/ls.jar" "https://repo1.maven.org/maven2/com/goterl/lazysodium-java/$v/lazysodium-java-$v.jar"
+          listing="$(unzip -l "$RUNNER_TEMP/ls.jar")"
+          for f in linux64/libsodium.so arm64/libsodium.so mac/libsodium.dylib mac_arm/libsodium.dylib windows64/libsodium.dll; do
+            grep -q " $f\$" <<<"$listing" || { echo "::error::lazysodium-java $v lacks $f"; exit 1; }
+          done
+          echo "lazysodium-java $v bundles libsodium for linux x64/arm64, macOS x64/arm64, windows x64"
+      - name: The pinned lazysodium-android AAR carries libsodium for every Android ABI
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's|^lazysodium = "\(.*\)"|\1|p' gradle/libs.versions.toml | head -1)
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/ls.aar" "https://repo1.maven.org/maven2/com/goterl/lazysodium-android/$v/lazysodium-android-$v.aar"
+          listing="$(unzip -l "$RUNNER_TEMP/ls.aar")"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q " jni/$abi/libsodium.so\$" <<<"$listing" || { echo "::error::lazysodium-android $v lacks jni/$abi/libsodium.so"; exit 1; }
+          done
+          unzip -p "$RUNNER_TEMP/ls.aar" classes.jar > "$RUNNER_TEMP/c.jar"
+          unzip -l "$RUNNER_TEMP/c.jar" | grep -q "com/goterl/lazysodium/SodiumAndroid.class" || { echo "::error::SodiumAndroid missing"; exit 1; }
+          echo "lazysodium-android $v bundles libsodium for arm64-v8a, armeabi-v7a, x86, x86_64"
+
+  build:
+    name: build ${{ matrix.plat }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { plat: linux-x64,   os: ubuntu-latest,    jni: linux,  gt: libpcagt, cc: cc,  unix: true }
+          - { plat: linux-arm64, os: ubuntu-24.04-arm, jni: linux,  gt: libpcagt, cc: cc,  unix: true }
+          - { plat: macos-x64,   os: macos-15-intel,   jni: darwin, gt: libpcagt, cc: cc,  unix: true }
+          - { plat: macos-arm64, os: macos-latest,     jni: darwin, gt: libpcagt, cc: cc,  unix: true }
+          - { plat: windows-x64, os: windows-latest,   jni: win32,  gt: pcagt,    cc: gcc, unix: false }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (flagship crates and the LESS reference C)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Stage directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/stage"
+          for m in pca-pairing pca-mpc-lwe-ot pca-fndsa pca-zk pca-fhe-seal pca-natives; do mkdir -p "$S/$m/natives/${{ matrix.plat }}"; done
+          echo "STAGE=$S" >> "$GITHUB_ENV"
+      - name: pcagt (blst at the pinned commit + GT shim + JNI wrapper)
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "$BLST_TAG" https://github.com/supranational/blst "$RUNNER_TEMP/blst"
+          C="$PCA_MONO_SDK/pca-pairing/src/main/c"
+          J="$(cygpath -u "$JAVA_HOME" 2>/dev/null || echo "$JAVA_HOME")"
+          PCA_GT_EXTRA_SRC="$C/pca_gt_jni.c" PCA_GT_EXTRA_CFLAGS="-I$J/include -I$J/include/${{ matrix.jni }}" \
+            .github/scripts/build-libpcagt.sh "$RUNNER_TEMP/blst" "$C/pca_gt.c" "$STAGE/pca-pairing/natives/${{ matrix.plat }}" ${{ matrix.gt }}
+      - name: liblweot, libfndsa and libpcazk (cargo --features capi)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .github/scripts/build-liblweot.sh "$RUNNER_TEMP/lweot" "$RUNNER_TEMP/mono/packages/pca-mpc-lwe-ot-wasm/crate"
+          cp "$RUNNER_TEMP"/lweot/*lweot.* "$STAGE/pca-mpc-lwe-ot/natives/${{ matrix.plat }}/"
+          .github/scripts/build-libfndsa.sh "$RUNNER_TEMP/fndsa" "$RUNNER_TEMP/mono/packages/pca-fndsa-wasm/crate"
+          cp "$RUNNER_TEMP"/fndsa/*fndsa.* "$STAGE/pca-fndsa/natives/${{ matrix.plat }}/"
+          .github/scripts/build-libpcazk.sh "$RUNNER_TEMP/pcazk" "$RUNNER_TEMP/mono/packages/pca-zk/crate"
+          cp "$RUNNER_TEMP"/pcazk/*pcazk.* "$STAGE/pca-zk/natives/${{ matrix.plat }}/"
+          rm -f "$STAGE"/pca-*/natives/*/*.h
+      - name: pca-wasmtime-host and its SHA-256 pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          b="$(.github/scripts/build-wasmtime-host.sh "$RUNNER_TEMP/wasmtime-host" "$RUNNER_TEMP/mono/packages/pca-sandbox/wasmtime-host" | tail -1)"
+          cp "$b" "$STAGE/pca-natives/natives/${{ matrix.plat }}/"
+          if command -v sha256sum >/dev/null; then sha256sum "$b" | cut -d' ' -f1; else shasum -a 256 "$b" | cut -d' ' -f1; fi > "$STAGE/pca-natives/natives/${{ matrix.plat }}/pca-wasmtime-host.sha256"
+      - name: libsealc (Windows relies on the shared script's Windows support, output sealc.dll)
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$(.github/scripts/build-libsealc.sh "$SEAL_TAG" "$RUNNER_TEMP/sealc" | tail -1)"
+          f="$(find "$d" -maxdepth 1 \( -name 'libsealc.so*' -o -name 'libsealc*.dylib' -o -name 'sealc.dll' \) | head -1)"
+          [ -n "$f" ] || { echo "::error::no sealc library in $d"; exit 1; }
+          case "$f" in *.dylib) n=libsealc.dylib ;; *.dll) n=sealc.dll ;; *) n=libsealc.so ;; esac
+          cp -L "$f" "$STAGE/pca-fhe-seal/natives/${{ matrix.plat }}/$n"
+      - name: atlas_less (Windows relies on the shared script's Windows support, output atlas_less.dll)
+        shell: bash
+        run: |
+          set -euo pipefail
+          p="$("$RUNNER_TEMP/pca-flagship/sdks/pca-less-c/build.sh" "$RUNNER_TEMP/less" | tail -1)"
+          cp "$p" "$STAGE/pca-natives/natives/${{ matrix.plat }}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: natives-${{ matrix.plat }}
+          path: ${{ runner.temp }}/stage
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono kotlin-pca
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: natives-*
+          path: stage
+          merge-multiple: true
+      - name: Java core library from the pca-java mirror
+        shell: bash
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY_OWNER:-Atlas-Authorization}/pca-java.git"
+          REF="${GITHUB_REF_NAME:-main}"
+          git ls-remote --exit-code "$URL" "refs/heads/$REF" "refs/tags/$REF" >/dev/null 2>&1 || REF=main
+          git clone -q --depth 1 --branch "$REF" "$URL" "$RUNNER_TEMP/pca-java"
+          mvn -B -ntp -q -f "$RUNNER_TEMP/pca-java/pom.xml" install -DskipTests
+      - name: Java adapters with their libraries, then each Kotlin module jar
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: |
+          set -euo pipefail
+          S="$GITHUB_WORKSPACE/stage"; D="$GITHUB_WORKSPACE/dist"
+          for m in pca-mpc-lwe-ot pca-fndsa pca-zk pca-fhe-seal; do
+            test -f $m/adapter/pom.xml || { echo "::error::$m/adapter is missing: the mirror sync vendors the Java adapter at this ref"; exit 1; }
+            mvn -B -ntp -q -f $m/adapter/pom.xml install -DskipTests -Dpca.natives="$S/$m"
+          done
+          for m in pca-pairing pca-mpc-lwe-ot pca-fndsa pca-zk pca-fhe-seal pca-natives; do
+            ( cd $m
+              mvn -B -ntp -q package -DskipTests -Dpca.natives="$S/$m"
+              mvn -B -ntp -q dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory="$D/$m"
+              cp target/*.jar "$D/$m/" )
+          done
+          # every platform's library must be in the jar that carries it
+          for f in pca-pairing/pca-pairing-kotlin:pcagt:5 pca-mpc-lwe-ot/pca-mpc-lwe-ot:lweot:5 pca-fndsa/pca-fndsa:fndsa:5 pca-zk/pca-zk:pcazk:5 pca-fhe-seal/pca-fhe-seal:sealc:5 pca-natives/pca-natives-kotlin:atlas_less:5 pca-natives/pca-natives-kotlin:pca-wasmtime-host.sha256:5; do
+            IFS=: read -r p n want <<<"$f"
+            c=$(unzip -l "$D/$p-0.jar" | grep -c "natives/.*$n")
+            echo "$p $n: $c"; [ "$c" -ge "$want" ] || { echo "::error::$p-0.jar carries $c $n libraries, wanted $want"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-native-jars
+          path: dist
+          if-no-files-found: error
+
+  smoke:
+    name: install and load ${{ matrix.os }}
+    needs: package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest, windows-latest]
+    steps:
+      # no checkout: only the built jars and their runtime dependencies are on the class path
+      - uses: actions/download-artifact@v4
+        with:
+          name: kotlin-native-jars
+          path: dist
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '22'
+      - name: Load each module's library from its jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > Smoke.java <<'JAVA'
+          import java.io.File;
+          import java.nio.file.Files;
+          import java.security.MessageDigest;
+          public class Smoke {
+              public static void main(String[] a) throws Exception {
+                  Class<?> c = Class.forName(a[0]);
+                  Object k = c.getField("INSTANCE").get(null);
+                  if (a[0].endsWith(".PackagedNatives")) {
+                      Object h = c.getMethod("wasmtimeHost").invoke(k);
+                      if (h == null) throw new IllegalStateException("no packaged host for this platform");
+                      File f = (File) h.getClass().getField("binary").get(h);
+                      String pin = (String) h.getClass().getField("sha256").get(h);
+                      StringBuilder sb = new StringBuilder();
+                      for (byte b : MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(f.toPath()))) sb.append(String.format("%02x", b));
+                      if (!sb.toString().equals(pin)) throw new IllegalStateException("host does not match its pin");
+                      Process p = new ProcessBuilder(f.getPath()).redirectErrorStream(true).start(); // starts (any exit code); a bad binary throws here
+                      p.getOutputStream().close();
+                      if (!p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly();
+                  } else {
+                      Object r = a[0].endsWith(".Gt") ? c.getMethod("isElement", byte[].class).invoke(k, (Object) new byte[576])
+                                : a[0].endsWith(".LessNative") ? c.getMethod("getAvailable").invoke(k)
+                                : c.getMethod("available").invoke(k);
+                      Object want = a[0].endsWith(".Gt") ? Boolean.FALSE : Boolean.TRUE;
+                      if (!want.equals(r)) throw new IllegalStateException(a[0] + " returned " + r);
+                  }
+                  System.out.println(a[0] + " ok");
+              }
+          }
+          JAVA
+          run() { java --enable-native-access=ALL-UNNAMED -cp "$1" Smoke.java "$2"; }
+          run "dist/pca-pairing/*" net.atlasauth.pca.pairing.Gt
+          run "dist/pca-mpc-lwe-ot/*" net.atlasauth.pca.mpc.lwe.EndemicLweOt
+          run "dist/pca-fndsa/*" net.atlasauth.pca.fndsa.FnDsaNative
+          run "dist/pca-zk/*" net.atlasauth.pca.zk.ZkNative
+          run "dist/pca-natives/*" net.atlasauth.pca.natives.PackagedNatives
+          run "dist/pca-fhe-seal/*" net.atlasauth.pca.fhe.Fhe
+          # LessNative (compiled into the pairing jar) finds the library in the pca-natives jar
+          sep=:; [ "$RUNNER_OS" = Windows ] && sep=';'
+          run "dist/pca-pairing/*${sep}dist/pca-natives/*" net.atlasauth.pca.verifier.LessNative

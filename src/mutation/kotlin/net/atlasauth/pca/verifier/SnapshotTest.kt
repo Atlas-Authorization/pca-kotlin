@@ -23,10 +23,12 @@ class SnapshotTest {
 
     private fun check(computed: Map<String, String>) {
         val exp = ReasonSnapshot.load()
+        val bad = ArrayList<String>()
         for ((k, v) in computed) {
             val want = exp[ReasonSnapshot.esc(k)] ?: continue
-            assertEquals(k, want, v)
+            if (want != v) bad.add("$k\n  want: $want\n  got:  $v")
         }
+        assertTrue("${bad.size} snapshot line(s) differ:\n" + bad.take(40).joinToString("\n"), bad.isEmpty())
     }
 
     @Suppress("UNCHECKED_CAST")
